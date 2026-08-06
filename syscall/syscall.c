@@ -340,7 +340,6 @@ static int sys_uptime(void) {
 
 /* ==================== 分发器 ==================== */
 
-/**
 /* sys_usb_info - 打印枚举的 USB 设备列表与 MSC 状态（调试/验证用） */
 static int sys_usb_info(void) {
     usb_device_t *dev = usb_get_device_list();
