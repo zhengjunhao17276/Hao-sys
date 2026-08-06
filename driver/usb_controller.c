@@ -798,6 +798,7 @@ typedef struct {
     uhci_td_t *td;      /* 对应的传输描述符 */
     bool active;        /* 该中断传输是否仍在活跃状态 */
     int dt;             /* ⚠️ 修复（留意项 1）：DATA toggle——每次重提交交替 */
+    usb_hc_t *hc;       /* 所属控制器（出错重提交时用） */
 } uhci_int_urb_t;
 
 /* 中断传输 URB 表，最多跟踪 4 个活跃的中断传输 */
@@ -870,6 +871,7 @@ static int uhci_interrupt_transfer(usb_hc_t *hc, uint8_t dev_addr,
     int_urbs[int_urb_count].td = td;
     int_urbs[int_urb_count].active = true;
     int_urbs[int_urb_count].dt = 0;   /* 首提 DATA0 */
+    int_urbs[int_urb_count].hc = hc;
     int_urb_count++;
     return 0;
 }
@@ -911,6 +913,20 @@ void usb_poll(void) {
                 /* 从 TD 控制状态字提取实际传输的长度（位 16-26） */
                 urb->length = (td->ctrl_status >> 16) & 0x7FF;
                 urb->callback(urb);   /* 调用上层注册的回调函数 */
+            } else if (urb && err) {
+                /* ⚠️ 修复：出错时不调回调（避免脏数据进上层），但
+                 * 必须保持轮询——否则键盘/鼠标中断传输永久停摆
+                 * （回调里才有重提交逻辑）。这里直接重新提交。 */
+                usb_urb_t nu = {
+                    .type = USB_URB_INTERRUPT,
+                    .dev_addr = urb->dev_addr,
+                    .endpoint = urb->endpoint,
+                    .direction = urb->direction,
+                    .length = urb->length,
+                    .buffer = urb->buffer,
+                    .callback = urb->callback,
+                };
+                usb_submit_urb(int_urbs[i].hc, &nu);
             }
         }
     }
