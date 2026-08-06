@@ -49,6 +49,14 @@
  * 读取期间屏蔽 NMI（0x70 的 bit 7 = 1），读完恢复。
  */
 static uint8_t rtc_read_reg(uint8_t reg) {
+    /* ⚠️ 修复：先等待 UIP（寄存器 A bit7）清除。
+     * RTC 每秒有一个约 2ms 的更新窗口，期间所有时间寄存器
+     * 都可能处于撕裂状态（年份读出 0x74 而非 0x26 这类怪值）。
+     * 真机上不等待会读到中间态数据；QEMU 下偶尔也会复现。 */
+    for (int i = 0; i < 10000; i++) {
+        outb(CMOS_ADDR, 0x0A | 0x80);          /* 读寄存器 A，屏蔽 NMI */
+        if (!(inb(CMOS_DATA) & 0x80)) break;    /* UIP=0：可以安全读取 */
+    }
     outb(CMOS_ADDR, reg | 0x80);   /* 屏蔽 NMI */
     uint8_t v = inb(CMOS_DATA);
     outb(CMOS_ADDR, 0x00);         /* 恢复 NMI */
@@ -86,7 +94,11 @@ uint32_t rtc_get_time_packed(void) {
  * @return ((年 - 2000) << 16) | (月 << 8) | 日
  */
 uint32_t rtc_get_date_packed(void) {
-    return ((uint32_t)(rtc_get_year() - 2000) << 16)
+    /* ⚠️ 修复：rtc_get_year() 返回两位数年份（如 26，即“年-2000”）。
+     * 旧代码写 (year - 2000) 会得到 26-2000 = -1974 → uint32 下溢，
+     * 高 16 位变成 0xF84A，shell 取 &0xFF 得 0x4A=74 → 显示 2074。
+     * 正确做法：两位数年份本身就是“年-2000”，直接放高 16 位。 */
+    return ((uint32_t)rtc_get_year() << 16)
          | ((uint32_t)rtc_get_month() << 8)
          | (uint32_t)rtc_get_day();
 }
