@@ -1,23 +1,7 @@
-/**
- * =========================================================================
- * keyboard.c - 统一键盘驱动（PS/2 中断驱动 + USB 轮询）
- *
- * 该驱动同时支持 PS/2 键盘和 USB HID 键盘。PS/2 键盘使用 IRQ1
- * 中断方式——每次按键触发中断，将扫描码存入环形缓冲区。USB 键盘
- * 使用轮询方式——在 keyboard_get_char 中通过 usb_keyboard_poll()
- * 获取 HID 报告。
- *
- * PS/2 扫描码格式：
- *   按键按下触发 Make Code（< 0x80）
- *   按键释放触发 Break Code（= Make Code + 0x80）
- *   例如：'A' 按下 = 0x1E，'A' 释放 = 0x9E
- *
- * 修饰键（Shift/Caps Lock）的状态由全局变量维护，影响扫描码到
- * ASCII 的转换结果。
- *
- * 方向键已经被拦截用于 VGA 光标移动（up/down/left/right），
- * 不作为字符返回。
- * =========================================================================
+/*
+ * keyboard.c - 统一键盘驱动（PS/2 中断 + USB 轮询）
+ * 扫描码 → ASCII 转换（Make < 0x80，Break = Make + 0x80）；
+ * 方向键拦截用于 VGA 光标移动，不作为字符返回。
  */
 
 #include "../include/driver/keyboard.h"
@@ -29,25 +13,15 @@
 #include <stdint.h>
 #include <stdbool.h>
 
-/* ===================== 共享状态（与 USB 键盘共用） ===================== */
 bool shift_pressed = false;      /* Shift 键是否被按下 */
 bool caps_lock = false;          /* Caps Lock 是否锁定 */
 
-/* ===================== PS/2 键盘环形缓冲区 ===================== */
 #define PS2_BUFFER_SIZE 64       /* 环形缓冲区大小 */
 static volatile uint8_t ps2_buffer[PS2_BUFFER_SIZE];  /* 扫描码缓冲区 */
 static volatile uint16_t ps2_head = 0;   /* 读取位置（消费者索引） */
 static volatile uint16_t ps2_tail = 0;   /* 写入位置（生产者索引） */
 
-/**
- * PS/2 扫描码到 ASCII 的映射表（非 Shift 状态）
- *
- * 采用 C99 指定初始化器（designated initializer）语法，只初始化
- * 有意义的扫描码位置，其余默认为 0。这样可以一目了然地看到每个
- * 按键的映射关系。
- *
- * 扫描码来源：IBM PC/AT 键盘标准 Set 1。
- */
+/* 扫描码 → ASCII 映射（非 Shift，IBM PC/AT Set 1） */
 static const char normal_map[128] = {
     [0x01] = 0x1B,              /* Esc */
     [0x02] = '1', [0x03] = '2', [0x04] = '3', [0x05] = '4',
@@ -74,10 +48,7 @@ static const char normal_map[128] = {
     [0x39] = ' ',               /* Space */
 };
 
-/**
- * PS/2 扫描码到 ASCII 的映射表（Shift 按下状态）
- * 与 normal_map 对应，但输出字母大写、数字变为符号。
- */
+/* Shift 状态映射：字母大写、数字变符号 */
 static const char shift_map[128] = {
     [0x01] = 0x1B,              /* Esc */
     [0x02] = '!', [0x03] = '@', [0x04] = '#', [0x05] = '$',
@@ -104,20 +75,8 @@ static const char shift_map[128] = {
     [0x39] = ' ',
 };
 
-/* ===================== 字母大小写应用 ===================== */
 
-/**
- * apply_caps_lock - 根据当前 shift 和 caps_lock 状态调整字母大小写
- *
- * 处理逻辑：
- *   Shift 和 Caps Lock 在字母上的关系是异或（XOR）：
- *   - Shift 按下但 Caps 关闭 → 大写
- *   - Shift 按下且 Caps 开启 → 小写（"反转"效果）
- *   - Shift 释放且 Caps 开启 → 大写
- *   - Shift 释放且 Caps 关闭 → 小写
- *
- * 非字母字符不受 Caps Lock 影响。
- */
+/* 大小写：Shift 与 Caps Lock 是 XOR 关系，非字母不受影响 */
 static char apply_caps_lock(char c) {
     if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) {
         bool want_upper = shift_pressed ^ caps_lock;  /* XOR */
@@ -130,19 +89,8 @@ static char apply_caps_lock(char c) {
     return c;
 }
 
-/* ===================== PS/2 扫描码转换 ===================== */
 
-/**
- * ps2_scancode_to_ascii - 将 PS/2 扫描码转换为 ASCII 字符
- * @sc: 从键盘读取的原始扫描码
- *
- * 返回值：
- *   0      → 修饰键（Shift/Ctrl/Alt/Caps）或按键释放事件
- *   非 0   → 转换后的 ASCII 字符
- *
- * 副作用：
- *   此函数会更新 shift_pressed 和 caps_lock 这两个全局状态变量。
- */
+/* 扫描码转 ASCII；0 = 修饰键/释放事件。副作用：更新 shift/caps 状态 */
 static char ps2_scancode_to_ascii(uint8_t sc) {
     if (sc & 0x80) {
         /* bit 7 = 1 → 按键释放事件 */
@@ -153,69 +101,50 @@ static char ps2_scancode_to_ascii(uint8_t sc) {
         return 0;
     }
 
-    /* 按键按下事件 */
     if (sc == 0x2A || sc == 0x36) {
-        shift_pressed = true;       /* Left/Right Shift 按下 */
+        shift_pressed = true;       /* Shift 按下 */
         return 0;
     }
 
-    if (sc == 0x3A) {               /* Caps Lock 按下 */
-        caps_lock = !caps_lock;     /* 切换 Caps Lock 状态 */
+    if (sc == 0x3A) {               /* Caps Lock 切换 */
+        caps_lock = !caps_lock;
         return 0;
     }
 
-    /* 根据 Shift 状态选择映射表 */
     const char *map = shift_pressed ? shift_map : normal_map;
     char c = 0;
     if (sc < sizeof(normal_map)) {
         c = map[sc];
     }
 
-    /* 应用 Caps Lock 逻辑 */
     if (c) c = apply_caps_lock(c);
     return c;
 }
 
-/* ===================== PS/2 中断处理 ===================== */
 
-/**
- * keyboard_irq_handler - PS/2 键盘 IRQ1 中断处理程序
- *
- * 由 isr_asm.asm 中的 irq1_handler 调用。读取 PS/2 数据端口（0x60）
- * 获得扫描码，存入环形缓冲区（如果未满），然后发送 EOI。
- *
- * 注意：这个函数在中断上下文中执行，只能访问 volatile 变量。
- */
+/* IRQ1 中断处理：扫描码入环形缓冲后发 EOI（中断上下文，只能碰 volatile） */
 void keyboard_irq_handler(void) {
     /* ⚠️ 与 ps2_mouse_irq_handler 同理：getchar 的读空循环（cli 下）
      * 可能已把 FIFO 清空，此处 inb(0x60) 会读到空 FIFO 垃圾。
      * 先查 OBF（bit0）再读，避免垃圾扫描码入缓冲。 */
     if (inb(0x64) & 0x01) {
-        uint8_t sc = inb(0x60);                   /* 从 PS/2 控制器读取扫描码 */
+        uint8_t sc = inb(0x60);
         uint16_t next_tail = (ps2_tail + 1) % PS2_BUFFER_SIZE;
-        if (next_tail != ps2_head) {              /* 缓冲区未满 */
-            ps2_buffer[ps2_tail] = sc;            /* 写入扫描码 */
-            ps2_tail = next_tail;                 /* 更新尾指针 */
+        if (next_tail != ps2_head) {
+            ps2_buffer[ps2_tail] = sc;
+            ps2_tail = next_tail;
         }
     }
-    pic_send_eoi(1);                              /* 发送 EOI 给 IRQ1 */
+    pic_send_eoi(1);
 }
 
-/* ===================== USB 键盘外部函数 ===================== */
 extern void usb_keyboard_init(void);
 extern bool usb_keyboard_has_char(void);
 extern char usb_keyboard_get_char(void);
 extern void usb_keyboard_poll(void);
 
-/* ===================== 初始化 ===================== */
 
-/**
- * keyboard_init - 初始化键盘驱动
- *
- * 清空 PS/2 控制器缓冲（可能残留了启动过程中的按键事件），
- * 然后初始化 USB 键盘子系统（如果存在）。
- * PS/2 键盘已经在 BIOS 阶段完成初始化，只需清空缓冲即可。
- */
+/* 清掉启动残留的按键事件；PS/2 已被 BIOS 初始化，只需清缓冲 */
 void keyboard_init(void) {
     ps2_head = ps2_tail = 0;
     shift_pressed = false;
@@ -226,65 +155,47 @@ void keyboard_init(void) {
 
     vga_write("[PS/2 Keyboard] Initialized.\n");
 
-    /* 初始化 USB 键盘（如果存在 USB 设备） */
     usb_keyboard_init();
 
-    /* 屏蔽键盘 IRQ，使用纯轮询方式读取键盘（避免 IRQ 与轮询竞争） */
+    /* 屏蔽键盘 IRQ，纯轮询读取——避免 IRQ 与轮询竞争 */
     pic_mask_irq(1, true);
 }
 
-/* ===================== 字符读取 ===================== */
 
-/**
- * keyboard_have_key - 检查是否有按键等待处理
- *
- * 同时检查 PS/2 缓冲区和 USB 键盘缓冲区。
- */
+/* PS/2 或 USB 是否有按键待处理 */
 bool keyboard_have_key(void) {
     if (ps2_head != ps2_tail) return true;
     return usb_keyboard_has_char();
 }
 
-/**
- * keyboard_get_char - 阻塞式获取一个键盘输入的 ASCII 字符
- *
- * 获取策略：
- *   1. 优先从 PS/2 环形缓冲区读取扫描码
- *   2. 非字符的扫描码（方向键）直接处理为光标移动
- *   3. 修饰键（Shift/Caps）更新状态但不返回字符
- *   4. 如果没有 PS/2 数据，轮询 USB 键盘
- *   5. 如果都没有数据，执行 HLT 等待中断唤醒
- */
+/* 阻塞取键：先 PS/2 缓冲，再轮询 USB，都没有就 sti;hlt 等中断唤醒 */
 char keyboard_get_char(void) {
     while (1) {
-        /* ===== 处理 PS/2 缓冲区 ===== */
         if (ps2_head != ps2_tail) {
             uint8_t sc = ps2_buffer[ps2_head];
             ps2_head = (ps2_head + 1) % PS2_BUFFER_SIZE;
 
-            /* 处理方向键：Up/Down 返回特殊码给 shell（命令历史用），
-             * Left/Right 仍直接移动 VGA 光标（编辑当前行用） */
-            if (!(sc & 0x80)) { /* 按下事件 */
+            /* 方向键：Up/Down 返回特殊码给 shell（命令历史），
+             * Left/Right 直接移动 VGA 光标（编辑当前行） */
+            if (!(sc & 0x80)) {
                 switch (sc) {
-                    case 0x48: return 0x01;   /* Up   → 特殊码 0x01（历史上翻） */
-                    case 0x50: return 0x02;   /* Down → 特殊码 0x02（历史下翻） */
+                    case 0x48: return 0x01;   /* Up → 历史上翻 */
+                    case 0x50: return 0x02;   /* Down → 历史下翻 */
                     case 0x4B: vga_move_left();  continue;
                     case 0x4D: vga_move_right(); continue;
                     default: break;
                 }
             }
 
-            /* 转换为 ASCII（同时更新 shift/caps 状态） */
+            /* 转 ASCII（同时更新 shift/caps 状态） */
             char c = ps2_scancode_to_ascii(sc);
-            if (c) return c;       /* 返回有效的 ASCII 字符 */
-            continue;              /* 修饰键等不产生字符的事件 */
+            if (c) return c;
+            continue;
 
         } else {
-            /* PS/2 缓冲区为空时，主动轮询 USB 键盘获取报告 */
             usb_keyboard_poll();
         }
 
-        /* ===== 检查 USB 键盘缓冲区 ===== */
         if (usb_keyboard_has_char()) {
             char c = usb_keyboard_get_char();
             if (c) return c;
@@ -330,7 +241,7 @@ char keyboard_get_char(void) {
                     ps2_tail = next_tail;
                 }
             } else {
-                break;   /* 输出缓冲已空 */
+                break;
             }
         }
     }

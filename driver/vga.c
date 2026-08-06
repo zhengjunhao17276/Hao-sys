@@ -1,21 +1,6 @@
-/**
- * =========================================================================
+/*
  * vga.c - VGA 文本模式输出驱动
- *
- * VGA 文本模式的显存位于物理地址 0xB8000，是一个 80 列 × 25 行的
- * 字符数组。每个字符占用 2 字节：
- *   低位字节 = 字符的 ASCII 码
- *   高位字节 = 属性字节（bit 0-3 = 前景色, bit 4-6 = 背景色, bit 7 = 闪烁）
- *
- * 光标位置控制：
- *   通过 VGA CRTC 寄存器（端口 0x3D4/0x3D5）的索引 0x0F（光标位置低 8 位）
- *   和 0x0E（光标位置高 8 位）控制。
- *
- * 保护区域机制：
- *   这是一个实用功能——设置一个"保护边界"后，边界之前的所有内容变为
- *   只读。滚动时只滚动保护区域以下的行，换行也不会退回到保护区域。
- *   设计用于 Shell 交互：保护历史输出不会被新输出覆盖或推走。
- * =========================================================================
+ * 显存 0xB8000（80×25）；保护区域用于把 Shell 历史输出设为只读。
  */
 
 #include "../include/driver/vga.h"
@@ -34,17 +19,11 @@ static uint8_t default_color = 0x0F;
 /* 硬件光标可见性标志（当前未使用，保留供后续光标闪烁控制） */
 static bool cursor_visible __attribute__((unused)) = true;
 
-/* ==================== 保护区域状态 ==================== */
 static bool protection_enabled = false;
 static int protected_row = 0;   /* 保护区域的行边界 */
 static int protected_col = 0;   /* 保护区域的列边界 */
 
-/**
- * is_position_protected - 判断指定位置是否在保护区域内
- *
- * 保护区域的定义：行 < protected_row 或 (行 == protected_row 且 列 < protected_col)
- * 保护区域内的字符不能被修改或覆盖。
- */
+/* 保护区域内不可写：行 < protected_row，或同行且列 < protected_col */
 static bool is_position_protected(int row, int col) {
     if (!protection_enabled) return false;
     if (row < protected_row) return true;
@@ -52,61 +31,40 @@ static bool is_position_protected(int row, int col) {
     return false;
 }
 
-/* ==================== 硬件光标控制 ==================== */
 
-/**
- * vga_update_cursor - 根据当前 cursor_row/cursor_col 更新硬件光标位置
- *
- * 向 VGA CRTC 寄存器写入光标位置（80 × row + col）。
- */
+/* 按当前光标位置更新硬件光标（CRTC 寄存器，80 × row + col） */
 void vga_update_cursor(void) {
     uint32_t fl = irq_lock();
     uint16_t pos = cursor_row * VGA_WIDTH + cursor_col;
-    outb(0x3D4, 0x0F);                         /* 选择光标位置低位寄存器 */
-    outb(0x3D5, (uint8_t)(pos & 0xFF));        /* 写入低位 */
-    outb(0x3D4, 0x0E);                         /* 选择光标位置高位寄存器 */
-    outb(0x3D5, (uint8_t)((pos >> 8) & 0xFF)); /* 写入高位 */
+    outb(0x3D4, 0x0F);                         /* 光标低 8 位 */
+    outb(0x3D5, (uint8_t)(pos & 0xFF));
+    outb(0x3D4, 0x0E);                         /* 光标高 8 位 */
+    outb(0x3D5, (uint8_t)((pos >> 8) & 0xFF));
     irq_unlock(fl);
 }
 
-/* ==================== 初始化和清屏 ==================== */
 
-/**
- * vga_disable_cursor - 禁用硬件光标
- *
- * VGA CRTC 寄存器 0x0A（光标起始寄存器）的 bit 5 控制光标使能：
- *   bit 5 = 1 → 禁用光标
- *   bit 5 = 0 → 启用光标
- */
+/* CRTC 0x0A 的 bit5=1 禁用硬件光标 */
 void vga_disable_cursor(void) {
     outb(0x3D4, 0x0A);
-    outb(0x3D5, 0x20);   /* bit 5 = 1 禁用光标 */
+    outb(0x3D5, 0x20);
 }
 
-/**
- * vga_enable_cursor - 启用硬件光标
- *
- * 清除 bit 5 以启用光标，并用寄存器 0x0B 设置光标形状。
- */
+/* 清 bit5 启用光标，0x0B 设置光标形状 */
 void vga_enable_cursor(void) {
     outb(0x3D4, 0x0A);
-    outb(0x3D5, 0x00);   /* 启用光标 */
+    outb(0x3D5, 0x00);
     outb(0x3D4, 0x0B);
-    outb(0x3D5, 0x0F);   /* 光标形状：从顶到底 */
+    outb(0x3D5, 0x0F);   /* 形状：从顶到底 */
 }
 
-/**
- * vga_init - 初始化 VGA 显示子系统
- * 清屏并启用硬件光标。
- */
+/* 初始化：清屏 + 启用光标 */
 void vga_init(void) {
     vga_clear();
     vga_enable_cursor();
 }
 
-/**
- * vga_clear - 清空屏幕（所有字符填空格）并重置光标到 (0,0)
- */
+/* 清屏并复位光标到 (0,0) */
 void vga_clear(void) {
     uint32_t fl = irq_lock();
     mouse_pointer_erase();   /* 指针先擦掉，避免残留 */
@@ -119,17 +77,9 @@ void vga_clear(void) {
     irq_unlock(fl);
 }
 
-/* ==================== 屏幕滚动 ==================== */
 
-/**
- * scroll - 当光标超出屏幕底部时向上滚动
- *
- * 分两种情况：
- *   1. 未启用保护区域：整屏上移一行，顶部行被丢弃
- *   2. 启用保护区域：只滚动保护边界以下的部分，保护区域保持不变
- */
 static void scroll(void) {
-    if (cursor_row < VGA_HEIGHT) return;  /* 还没超出屏幕，不需滚动 */
+    if (cursor_row < VGA_HEIGHT) return;
 
     /* 整屏向上滚动一行（从第 1 行开始覆盖到第 0 行）。
      * ⚠️ 历史修复：保护区域启用时曾尝试"只滚动边界以下"，但 start_row
@@ -142,7 +92,6 @@ static void scroll(void) {
             VGA_ADDR[(row-1)*VGA_WIDTH + col] = VGA_ADDR[row*VGA_WIDTH + col];
         }
     }
-    /* 最后一行清空 */
     for (int col = 0; col < VGA_WIDTH; col++) {
         VGA_ADDR[(VGA_HEIGHT-1)*VGA_WIDTH + col] = ((uint16_t)default_color << 8) | ' ';
     }
@@ -152,47 +101,36 @@ static void scroll(void) {
     vga_update_cursor();
 }
 
-/* ==================== 内部核心函数 ==================== */
 
-/**
- * putchar_core - VGA 输出核心函数（带颜色和权限检查）
- * @c:     要输出的字符
- * @color: 颜色属性
- *
- * 处理 \n（换行）、\r（回车）、\b（退格）、\t（制表符）转义序列，
- * 以及在保护区域边界处的约束行为。
- */
+/* 输出核心：处理 \n \r \b \t 转义和保护区域约束 */
 static void putchar_core(char c, uint8_t color) {
     /* 任何文本输出前先擦掉鼠标指针，避免指针和输出字符互相踩踏 */
     mouse_pointer_erase();
 
     if (c == '\n') {
-        /* 换行：行号 +1，列号归 0，但不允许进入保护区域 */
+        /* 换行，但不得进入保护区域 */
         int new_row = cursor_row + 1;
         int new_col = 0;
         if (is_position_protected(new_row, new_col)) {
-            return;  /* 保护区域内的换行被忽略 */
+            return;
         }
         cursor_row = new_row;
         cursor_col = new_col;
 
     } else if (c == '\r') {
-        /* 回车：列号归 0 */
         if (is_position_protected(cursor_row, 0)) {
             return;
         }
         cursor_col = 0;
 
     } else if (c == '\b') {
-        /* 退格：向左移动一格，清除该位置的字符 */
         int target_row = cursor_row;
         int target_col = cursor_col;
 
-        /* 计算退格的目标位置 */
         if (cursor_col > 0) {
             target_col = cursor_col - 1;
         } else if (cursor_row > 0) {
-            /* 到上一行末尾——找到最后一个非空格字符的位置 */
+            /* 上一行末尾：找最后一个非空格字符 */
             target_row = cursor_row - 1;
             int last_non_space = -1;
             for (int i = VGA_WIDTH - 1; i >= 0; i--) {
@@ -203,15 +141,13 @@ static void putchar_core(char c, uint8_t color) {
             }
             target_col = (last_non_space != -1) ? last_non_space : 0;
         } else {
-            return;  /* 已经在左上角，无法退格 */
+            return;  /* 已在左上角，无路可退 */
         }
 
-        /* 检查目标位置是否受保护 */
         if (is_position_protected(target_row, target_col)) {
             return;
         }
 
-        /* 执行退格 */
         cursor_row = target_row;
         cursor_col = target_col;
         VGA_ADDR[cursor_row * VGA_WIDTH + cursor_col] = ((uint16_t)color << 8) | ' ';
@@ -219,7 +155,7 @@ static void putchar_core(char c, uint8_t color) {
         return;
 
     } else if (c == '\t') {
-        /* 制表符：补足到下一个 4 字符边界 */
+        /* Tab：补到下一个 4 字符边界 */
         int spaces = 4 - (cursor_col % 4);
         for (int i = 0; i < spaces; i++) {
             putchar_core(' ', color);
@@ -227,9 +163,8 @@ static void putchar_core(char c, uint8_t color) {
         return;
 
     } else {
-        /* 普通可打印字符：直接写入显存 */
         if (is_position_protected(cursor_row, cursor_col)) {
-            return;  /* 保护区域内不能写入 */
+            return;
         }
         VGA_ADDR[cursor_row * VGA_WIDTH + cursor_col] = ((uint16_t)color << 8) | (uint8_t)c;
         cursor_col++;
@@ -247,11 +182,10 @@ static void putchar_core(char c, uint8_t color) {
         }
     }
 
-    scroll();        /* 如果超出屏幕则滚动 */
+    scroll();
     vga_update_cursor();
 }
 
-/* ==================== 对外接口 ==================== */
 
 void vga_putchar(char c) {
     uint32_t fl = irq_lock();
@@ -260,7 +194,7 @@ void vga_putchar(char c) {
 }
 
 void vga_write(const char *str) {
-    /* 整串一把锁：内部直接调 putchar_core（不再经 vga_putchar 重复加锁） */
+    /* 整串一把锁，直接走 putchar_core 避免逐字符加锁 */
     uint32_t fl = irq_lock();
     while (*str) putchar_core(*str++, default_color);
     irq_unlock(fl);
@@ -272,11 +206,7 @@ void vga_write_color(const char *str, uint8_t color) {
     irq_unlock(fl);
 }
 
-/**
- * vga_write_hex - 将 32 位整数格式化为十六进制输出（如 0x1BADB002）
- *
- * 从最低 4 位开始处理，每次取一个 nibble（4 位）转换。
- */
+/* 32 位整数按十六进制输出（0x00000000 格式） */
 void vga_write_hex(uint32_t val) {
     char hex[] = "0x00000000";
     for (int i = 9; i >= 2; i--) {
@@ -287,30 +217,17 @@ void vga_write_hex(uint32_t val) {
     vga_write(hex);
 }
 
-/* ==================== 保护区域接口 ==================== */
 
-/**
- * vga_set_default_color - 设置默认字符颜色（属性字节）
- * @color: 属性字节（低 4 位前景色，高 4 位背景色），如 0x0F=黑底白字
- *
- * 之后所有 vga_putchar/vga_write 输出都使用新颜色。
- * 供 settings TUI 的主题设置使用，实时生效。
- */
+/* 设置默认颜色（低 4 位前景、高 4 位背景，如 0x0F = 黑底白字） */
 void vga_set_default_color(uint8_t color) {
     default_color = color;
 }
 
-/**
- * vga_get_default_color - 读取当前默认颜色（属性字节）
- */
 uint8_t vga_get_default_color(void) {
     return default_color;
 }
 
-/**
- * vga_get_cursor_pos - 读取当前光标位置（打包）
- * @return (行 << 16) | 列
- */
+/* 打包返回光标位置：(行 << 16) | 列 */
 uint32_t vga_get_cursor_pos(void) {
     return ((uint32_t)cursor_row << 16) | (uint32_t)cursor_col;
 }
@@ -339,7 +256,6 @@ void vga_protect_before_cursor(void) {
     irq_unlock(fl);
 }
 
-/* ==================== 光标移动（带保护区域检查） ==================== */
 
 void vga_move_left(void) {
     uint32_t fl = irq_lock();
@@ -399,15 +315,7 @@ void vga_move_down(void) {
     irq_unlock(fl);
 }
 
-/**
- * vga_set_cursor - 将光标绝对定位到指定位置（带边界和保护区域检查）
- * @row: 行（0 ~ VGA_HEIGHT-1）
- * @col: 列（0 ~ VGA_WIDTH-1）
- *
- * 超出边界自动截断；目标在保护区域内则忽略。
- * 供鼠标驱动使用——鼠标移动时让光标跟随，
- * 和键盘方向键（vga_move_*）控制光标的体验一致。
- */
+/* 绝对定位光标：越界截断，保护区域内忽略 */
 void vga_set_cursor(int row, int col) {
     uint32_t fl = irq_lock();
     if (row < 0) row = 0;
@@ -423,7 +331,7 @@ void vga_set_cursor(int row, int col) {
     irq_unlock(fl);
 }
 
-/* ==================== 提示区域存根（当前为空实现） ==================== */
+/* 提示区域存根（当前为空实现） */
 void vga_set_prompt(int row, int col, int length) { (void)row; (void)col; (void)length; }
 void vga_clear_prompt(void) { }
 void vga_protect_last_output(int length) { (void)length; }

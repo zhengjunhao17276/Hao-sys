@@ -1,25 +1,7 @@
-/**
- * =========================================================================
- * mouse.c - 统一鼠标驱动（PS/2 + USB 双后端）
- *
- * 本驱动实现了两个后端：
- *   - PS/2 后端：使用 IRQ12 中断方式，每次中断读取 3 字节的鼠标数据包
- *   - USB 后端：通过中断传输获取 HID 鼠标报告
- *
- * 鼠标数据包解析（PS/2 标准 3 字节格式）：
- *   字节 0: [Y 溢出] [X 溢出] [Y 符号] [X 符号] [Alway 1] [中键] [右键] [左键]
- *   字节 1: X 位移量（有符号，受 X 符号位影响）
- *   字节 2: Y 位移量（有符号，受 Y 符号位影响）
- *
- * USB HID 鼠标报告格式（简化的 Boot Protocol）：
- *   字节 0: 按钮状态
- *   字节 1: X 位移（有符号 int8）
- *   字节 2: Y 位移（有符号 int8）
- *
- * 后端自动切换：
- *   USB 鼠标优先（支持热插拔），回退到 PS/2。如果 USB 断开，
- *   PS/2 被选为后备方案。
- * =========================================================================
+/*
+ * mouse.c - 统一鼠标驱动（PS/2 IRQ12 + USB HID 双后端）
+ * PS/2 包：3 字节 [状态][X 位移][Y 位移]；USB 走 Boot Protocol。
+ * USB 优先（支持热插拔），断开自动回退 PS/2。
  */
 
 #include "../include/driver/mouse.h"
@@ -31,7 +13,6 @@
 #include <stdint.h>
 #include <stdbool.h>
 
-/* ==================== 共享状态 ==================== */
 static volatile int mouse_x = 0, mouse_y = 0;   /* 鼠标位置（累计模式） */
 static volatile uint8_t mouse_btn = 0;           /* 按钮状态位 */
 static bool mouse_available = false;             /* 鼠标是否可用 */
@@ -44,53 +25,33 @@ typedef enum {
 } backend_t;
 static backend_t current_backend = BACKEND_NONE;
 
-/* ==================== PS/2 后端 ==================== */
 static bool ps2_initialized = false;
 
-/**
- * ps2_wait_ack - 等待 PS/2 设备返回 ACK（0xFA）
- * 超时约 10 万次轮询。返回 true 表示收到 ACK。
- */
+/* 等 PS/2 设备 ACK（0xFA），超时约 10 万次轮询 */
 static bool ps2_wait_ack(void) {
     for (int i = 0; i < 100000; i++) {
-        if (inb(0x64) & 0x01) {         /* 输出缓冲满 */
-            if (inb(0x60) == 0xFA) return true;  /* 0xFA = ACK */
+        if (inb(0x64) & 0x01) {
+            if (inb(0x60) == 0xFA) return true;
         }
     }
-    return false;  /* 超时 */
+    return false;
 }
 
-/**
- * ps2_send_command - 向 PS/2 鼠标发送命令
- * @cmd: 命令字节
- *
- * 先通过端口 0x64 写 0xD4（表示下一个字节发给鼠标），
- * 然后通过端口 0x60 写命令字节。
- */
+/* 发命令给鼠标：先 0x64 写 0xD4 指明目标，再 0x60 写命令 */
 static bool ps2_send_command(uint8_t cmd) {
-    outb(0x64, 0xD4);         /* 0xD4 = 下一个端口 0x60 的写入目标为鼠标 */
-    outb(0x60, cmd);           /* 发送命令到鼠标 */
+    outb(0x64, 0xD4);
+    outb(0x60, cmd);
     return ps2_wait_ack();
 }
 
-/* ===================== PS/2 鼠标协议解析 ===================== */
 
 /** 当前数据包的字节计数（凑齐 3 字节 = 一个完整数据包） */
 static uint8_t ps2_pkt_cycle = 0;
 /** 3 字节数据包缓存 */
 static uint8_t ps2_pkt[3];
 
-/* ===================== 灵敏度控制 ===================== */
 
-/**
- * MOUSE_SENSITIVITY_DEFAULT - 默认鼠标灵敏度
- *
- * 实际位移量（dx/dy）除以当前灵敏度才是光标位移：
- *   1 = 原始 1:1（最灵敏）
- *   2 = 半速
- *   4 = 四分之一速
- * 运行时可通过 mouse_set_sensitivity() 调整（settings TUI 用）。
- */
+/* 位移 ÷ 灵敏度 = 光标位移（settings TUI 可调） */
 #define MOUSE_SENSITIVITY_DEFAULT 8   /* 用户要求默认速度 8 */
 
 /** 当前鼠标灵敏度（1~16） */
@@ -100,7 +61,6 @@ static int mouse_sensitivity = MOUSE_SENSITIVITY_DEFAULT;
 static int ps2_acc_x = 0;
 static int ps2_acc_y = 0;
 
-/* ===================== 鼠标指针渲染（与文本光标分离） ===================== */
 
 /** 指针当前是否可见 */
 static bool pointer_active = false;
@@ -108,16 +68,9 @@ static bool pointer_active = false;
 static int pointer_row = 0, pointer_col = 0;
 /** 指针下方的原始字符+属性（移动时恢复） */
 static uint16_t pointer_under = 0x0F20;
-/** 上一包的按钮状态（用于检测按下沿 = 点击） */
 
-/**
- * MOUSE_POINTER_GLYPH_DEFAULT - 默认鼠标指针图案（CP437 字形）
- *   0xDB █ 实心方块（默认，最醒目）
- *   0xB2 ▓ 深阴影    0xB1 ▒ 中阴影   0xB0 ░ 浅阴影
- *   0x10 ► 右箭头    0x11 ◄ 左箭头   0x1E ▲ 上箭头   0x1F ▼ 下箭头
- * 运行时可通过 mouse_set_pointer_glyph() 调整（settings TUI 用）。
- * ⚠️ 默认改为箭头（0x1E ▲，最接近鼠标光标形状）——用户要求。
- */
+/* 指针图案（CP437）：0xDB █ 实心、0xB2 ▓、0x10 ►、0x1E ▲ ……
+ * ⚠️ 默认用箭头 0x1E（用户要求，最接近鼠标形状） */
 #define MOUSE_POINTER_GLYPH_DEFAULT 0x1E
 
 /** 当前鼠标指针图案（0~255） */
@@ -143,7 +96,7 @@ void mouse_pointer_erase(void) {
     pointer_active = false;
     irq_unlock(fl);
 }
-/** pointer_draw - 在指定位置绘制鼠标指针（固定图案 + 反显属性） */
+/* 在 (row, col) 画指针（反显 + 可配置图案） */
 static void pointer_draw(int row, int col) {
     uint32_t fl = irq_lock();
     /* ⚠️ 优化：位置未变则跳过重绘——高频移动时每个包都走
@@ -162,7 +115,6 @@ static void pointer_draw(int row, int col) {
     uint32_t idx = row * VGA_WIDTH + col;
     pointer_under = VGA_ADDR[idx];
     uint8_t attr = (pointer_under >> 8) & 0xFF;
-    /* 用可配置图案渲染指针（默认实心方块） */
     VGA_ADDR[idx] = ((uint16_t)invert_attr(attr) << 8) | pointer_glyph;
     pointer_active = true;
     irq_unlock(fl);
@@ -171,27 +123,16 @@ static void pointer_draw(int row, int col) {
 
 
 
-/**
- * mouse_feed_byte - 向 PS/2 鼠标协议解析器喂一个字节
- * @data: 从 PS/2 数据端口（0x60）读出的原始字节
- *
- * 数据包格式（标准 PS/2 鼠标）：每 3 个字节一组：
- *   字节 0: 状态（按钮 + 符号位 + 溢出位），bit3 通常为 1
- *   字节 1: X 位移（有符号）
- *   字节 2: Y 位移（有符号）
- *
- * 轮询路径（keyboard_get_char 的 PS/2 排空循环）和 IRQ 路径
- * （ps2_mouse_irq_handler）都通过这个函数解析，保证两路不重复实现。
- */
+/* 喂一个 PS/2 原始字节进协议解析器；轮询与 IRQ 两路共用，凑满 3 字节成一包 */
 void mouse_feed_byte(uint8_t data) {
     ps2_pkt[ps2_pkt_cycle++] = data;
-    if (ps2_pkt_cycle == 3) {                /* 凑齐完整 3 字节包 */
-        if (ps2_pkt[0] & 0x08) {             /* bit 3 通常为 1，表示数据包有效 */
-            /* 解析位移量——字节 0 的 bit 4/5 是 X/Y 符号位 */
+    if (ps2_pkt_cycle == 3) {
+        if (ps2_pkt[0] & 0x08) {             /* bit3=1 表示包有效 */
+            /* 位移量：bit 4/5 是 X/Y 符号位 */
             int dx = ps2_pkt[1];
             int dy = ps2_pkt[2];
-            if (ps2_pkt[0] & 0x10) dx |= 0xFFFFFF00;  /* X 符号扩展（负数） */
-            if (ps2_pkt[0] & 0x20) dy |= 0xFFFFFF00;  /* Y 符号扩展（负数） */
+            if (ps2_pkt[0] & 0x10) dx |= 0xFFFFFF00;  /* X 负值符号扩展 */
+            if (ps2_pkt[0] & 0x20) dy |= 0xFFFFFF00;  /* Y 负值符号扩展 */
 
             /* 累加位置坐标（带灵敏度缩放：位移 ÷ mouse_sensitivity，
              * 余数进累加器，小位移不丢失） */
@@ -202,14 +143,12 @@ void mouse_feed_byte(uint8_t data) {
             ps2_acc_x %= mouse_sensitivity;
             ps2_acc_y %= mouse_sensitivity;
 
-            /* 裁剪到 VGA 显示范围（80×25） */
             if (mouse_x < 0) mouse_x = 0;
             if (mouse_x >= 80) mouse_x = 79;
             if (mouse_y < 0) mouse_y = 0;
             if (mouse_y >= 25) mouse_y = 24;
 
-            /* 按钮状态（低 3 位：左键/右键/中键） */
-            uint8_t btn = ps2_pkt[0] & 0x07;
+            uint8_t btn = ps2_pkt[0] & 0x07;   /* 低 3 位：左/右/中键 */
 
             /* ⚠️ 修复（f173359 修正）：左键点击**不再**跳文本光标
              * （vga_set_cursor 已删除——误触会跳走打字位置）；
@@ -217,32 +156,20 @@ void mouse_feed_byte(uint8_t data) {
              * 移动，但不影响文本光标与输入。 */
             mouse_btn = btn;
 
-            /* 指针自由移动：反显渲染跟随鼠标位置 */
             pointer_draw(mouse_y, mouse_x);
         }
-        ps2_pkt_cycle = 0;   /* 重置，准备下一个数据包 */
+        ps2_pkt_cycle = 0;
     }
 }
 
-/**
- * mouse_poll - 轮询式消费 PS/2 鼠标数据
- *
- * 检查 PS/2 状态寄存器（0x64）的 bit 5（输出缓冲含鼠标数据），
- * 把所有待处理的鼠标字节喂给协议解析器。
- * 纯轮询模式下由 sys_getmouse 调用，保证鼠标状态是新鲜的。
- */
+/* 消费 PS/2 缓冲里的鼠标字节（bit5=AUX），保证状态最新 */
 void mouse_poll(void) {
     while (inb(0x64) & 0x20) {
         mouse_feed_byte(inb(0x60));
     }
 }
 
-/**
- * ps2_mouse_irq_handler - PS/2 鼠标 IRQ12 中断处理程序
- *
- * 读取一个字节交给公共解析器。当前系统采用纯轮询模式
- * （IRQ12 已被 mouse_init 屏蔽），此函数保留供将来开启中断时使用。
- */
+/* IRQ12 中断处理：读一个字节交给公共解析器 */
 void ps2_mouse_irq_handler(void) {
     /* ⚠️ 修复：读 0x60 前先查状态寄存器 AUX 位（bit5）。
      * 竞争场景：getchar 休眠唤醒后的 for(;;) 循环在 cli 下会把 PS/2
@@ -253,20 +180,10 @@ void ps2_mouse_irq_handler(void) {
     if (inb(0x64) & 0x20) {
         mouse_feed_byte(inb(0x60));
     }
-    pic_send_eoi(12);  /* 发送 EOI 给 IRQ12 */
+    pic_send_eoi(12);
 }
 
-/**
- * ps2_init - 初始化 PS/2 鼠标
- *
- * 初始化序列：
- *   1. 启用鼠标（端口 0x64, 命令 0xA8）
- *   2. 设置 Compaq 状态字节（0x64/0x60）
- *   3. 设置采样率（0xF3）为 100Hz
- *   4. 设置分辨率（0xE8）为 4 点/mm
- *   5. 设置缩放（0xE6）为 1:1
- *   6. 启用数据报告（0xF4）
- */
+/* 初始化序列：0xA8 启用设备 → 状态字节开鼠标中断 → 采样率/分辨率/缩放 → 0xF4 开报告 */
 static bool ps2_init(void) {
     /* 启用 PS/2 鼠标设备（命令 0xA8 = Enable Auxiliary Device） */
     outb(0x64, 0xA8);
@@ -274,19 +191,18 @@ static bool ps2_init(void) {
     /* 读取 Compaq 状态字节（0x20 = Read Command Byte），设置 bit 1 启用鼠标中断 */
     outb(0x64, 0x20);
     uint8_t status = inb(0x60);
-    status |= 0x02;       /* 启用鼠标中断 */
-    outb(0x64, 0x60);     /* 写命令字节 */
+    status |= 0x02;
+    outb(0x64, 0x60);
     outb(0x60, status);
 
-    /* 配置鼠标参数 */
-    ps2_send_command(0xF3);  /* 设置采样率 */
+    ps2_send_command(0xF3);  /* 采样率 */
     ps2_send_command(100);   /* 100 次/秒 */
-    ps2_send_command(0xE8);  /* 设置分辨率 */
+    ps2_send_command(0xE8);  /* 分辨率 */
     ps2_send_command(3);     /* 4 点/毫米 */
     ps2_send_command(0xE6);  /* 缩放 1:1 */
 
-    /* 启用数据报告——如果失败则说明鼠标不存在 */
-    if (!ps2_send_command(0xF4)) {  /* 0xF4 = Enable Data Reporting */
+    /* 开数据报告——失败即鼠标不存在 */
+    if (!ps2_send_command(0xF4)) {
         vga_write("[PS/2 Mouse] Enable data report failed.\n");
         return false;
     }
@@ -308,25 +224,19 @@ static void ps2_get_packet(int *x, int *y, int *buttons) {
     __asm__ volatile ("pushl %0; popfl" : : "r"(flags));
 }
 
-/* ==================== USB 后端 ==================== */
 static bool usb_mouse_present = false;
 static usb_device_t *usb_dev = NULL;
 static usb_endpoint_descriptor_t *usb_ep_in = NULL;
 static usb_hc_t *usb_hc = NULL;
 static uint8_t usb_report_buf[8];                    /* HID 报告缓冲区 */
 
-/**
- * USB 鼠标报告结构（Boot Protocol 格式）
- */
+/* USB HID Boot Protocol 报告结构 */
 typedef struct {
     uint8_t buttons;    /* 按钮状态：bit0=左键, bit1=右键, bit2=中键 */
     int8_t  dx;         /* X 轴位移（有符号） */
     int8_t  dy;         /* Y 轴位移（有符号） */
 } __attribute__((packed)) usb_mouse_report_t;
 
-/**
- * usb_process_report - 处理 USB HID 鼠标报告
- */
 static void usb_process_report(uint8_t *data, int len) {
     if (len < 3) return;
     usb_mouse_report_t *rep = (usb_mouse_report_t*)data;
@@ -348,12 +258,7 @@ static void usb_process_report(uint8_t *data, int len) {
     pointer_draw(mouse_y, mouse_x);
 }
 
-/**
- * usb_mouse_urb_callback - USB 鼠标中断传输完成回调
- *
- * 处理完当前报告后，自动重新提交下一个中断传输以持续接收数据。
- * 如果重新提交失败（如设备断开），切换到 PS/2 后端。
- */
+/* 中断传输完成回调：处理报告后自动重提交，失败则回退 PS/2 */
 static void usb_mouse_urb_callback(usb_urb_t *urb) {
     if (urb->length < 3) {
         usb_mouse_present = false;
@@ -373,7 +278,6 @@ static void usb_mouse_urb_callback(usb_urb_t *urb) {
 
     usb_process_report((uint8_t*)urb->buffer, urb->length);
 
-    /* 自动重新提交中断传输，持续接收后续报告 */
     if (usb_mouse_present && usb_dev && usb_ep_in) {
         usb_urb_t new_urb = {
             .type = USB_URB_INTERRUPT,
@@ -408,13 +312,7 @@ extern bool find_hid_interface(usb_hc_t *hc, uint8_t dev_addr,
                                usb_endpoint_descriptor_t **out_ep_in,
                                usb_endpoint_descriptor_t **out_ep_out);
 
-/**
- * usb_mouse_probe - 探测 USB 鼠标设备
- *
- * 遍历 USB 设备列表，寻找 HID 设备。如果是复合设备（bDeviceClass=0x00），
- * 读取配置描述符并查找 HID 接口。找到后设置配置、启用 HID Boot Protocol、
- * 提交中断传输开始接收报告。
- */
+/* 找 HID Boot Mouse：设配置、开 Boot Protocol、提交中断传输收报告 */
 static bool usb_mouse_probe(void) {
     vga_write("[USB Mouse] Probing...\n");
     usb_device_t *dev = usb_get_device_list();
@@ -444,7 +342,6 @@ static bool usb_mouse_probe(void) {
                 is_hid = true;
                 usb_ep_in = ep_in;
 
-                /* 设置配置*/
                 ret = usb_control_transfer(dev->hc, dev->address,
                                            0x00, USB_REQ_SET_CONFIGURATION,
                                            cfg->bConfigurationValue, 0, NULL, 0);
@@ -515,16 +412,8 @@ static void usb_get_packet(int *x, int *y, int *buttons) {
     __asm__ volatile ("pushl %0; popfl" : : "r"(flags));
 }
 
-/* ==================== 统一初始化 ==================== */
 
-/**
- * mouse_init - 初始化统一鼠标驱动
- *
- * 探测顺序：
- *   1. 先尝试 USB 鼠标（优先级高，支持热插拔）
- *   2. 如果 USB 不存在，回退到 PS/2 鼠标
- *   3. 如果 PS/2 也不存在，标记为不可用
- */
+/* 先 USB（支持热插拔）后 PS/2，都没有则标记不可用 */
 void mouse_init(void) {
     vga_write("[Mouse] Initializing unified driver...\n");
 
@@ -551,43 +440,27 @@ void mouse_init(void) {
     vga_write("[Mouse] No mouse found.\n");
 }
 
-/* ==================== 灵敏度读写（settings TUI 用） ==================== */
 
-/**
- * mouse_get_sensitivity - 读取当前鼠标灵敏度
- * @return 灵敏度（1~16）
- */
 int mouse_get_sensitivity(void) {
     return mouse_sensitivity;
 }
 
-/**
- * mouse_set_sensitivity - 设置鼠标灵敏度
- * @sens: 目标灵敏度，自动限制在 1~16 范围内
- */
+/* 设置灵敏度，限制 1~16 */
 void mouse_set_sensitivity(int sens) {
     if (sens < 1) sens = 1;
     if (sens > 16) sens = 16;
     mouse_sensitivity = sens;
 }
 
-/**
- * mouse_get_pointer_glyph - 读取当前鼠标指针图案
- * @return 图案字符（CP437 字形码，0~255）
- */
 uint8_t mouse_get_pointer_glyph(void) {
     return pointer_glyph;
 }
 
-/**
- * mouse_set_pointer_glyph - 设置鼠标指针图案
- * @g: 图案字符（CP437 字形码），如 0xDB=█、0x10=►
- */
+/* 设置指针图案（CP437 字形码） */
 void mouse_set_pointer_glyph(uint8_t g) {
     pointer_glyph = g;
 }
 
-/* ==================== 统一获取数据 ==================== */
 
 void mouse_get_packet(int *x, int *y, int *buttons) {
     if (!mouse_available) {

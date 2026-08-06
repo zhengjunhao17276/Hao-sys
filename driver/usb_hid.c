@@ -1,20 +1,6 @@
-/**
- * =========================================================================
- * usb_hid.c - USB HID（人机交互设备）驱动
- *
- * HID 类（bInterfaceClass = 0x03）涵盖键盘、鼠标、游戏手柄等
- * 输入设备。本模块当前处于存根状态——可以探测 HID 设备、设置配置、
- * 打印信息，但完整的 HID 报告解析和中断传输尚未实现。
- *
- * 当前能力：
- *   - 扫描 USB 设备列表，识别 HID 接口（bInterfaceClass == 0x03）
- *   - 读取配置描述符，查找 HID 接口和端点
- *   - 设置配置
- *   - 不支持：报告描述符解析、中断传输提交、按键映射
- *
- * USB 键盘的完整驱动在 keyboard.c 中通过 usb_keyboard_* 存根
- * 预留了接口，但实际实现尚未编写。
- * =========================================================================
+/*
+ * usb_hid.c - USB HID 驱动（键盘 Boot Protocol 完整驱动 + HID 探测）
+ * 键盘：8 字节 Boot 报告，沿检测入环形缓冲，中断传输轮询收数。
  */
 
 #include "../include/driver/usb.h"
@@ -25,7 +11,7 @@
 
 /* find_hid_interface 已在 usb_controller.c 中定义，此处不再重复 */
 
-/* ========== USB 键盘（Boot Protocol 完整驱动） ========== */
+/* ---- USB 键盘（Boot Protocol 完整驱动） ---- */
 
 /* HID 类请求 */
 #define HID_REQ_SET_PROTOCOL 0x0B
@@ -53,12 +39,7 @@ static void usb_kb_push(char c) {
     }
 }
 
-/**
- * usb_kb_map - HID 用法码 → 字符（Boot Protocol 键盘）
- * @usage: USB HID 键盘用法码（报告字节 2-7）
- * @shift: 是否按下 Shift
- * 返回：ASCII 字符，0=无映射（Ctrl/Alt/未知键）
- */
+/* HID 用法码 → ASCII（0=无映射：Ctrl/Alt/未知键） */
 static char usb_kb_map(uint8_t usage, bool shift) {
     /* 字母 a-z（0x04-0x1D） */
     if (usage >= 0x04 && usage <= 0x1D)
@@ -92,24 +73,16 @@ static char usb_kb_map(uint8_t usage, bool shift) {
     }
 }
 
-/** 报告里是否包含某个用法码 */
+/* 报告里是否含某用法码 */
 static bool usb_kb_has_key(const uint8_t *r, uint8_t usage) {
     for (int i = 2; i < 8; i++)
         if (r[i] == usage) return true;
     return false;
 }
 
-/**
- * usb_kb_callback - 中断传输完成回调
- *
- * Boot Protocol 键盘报告（8 字节）：
- *   字节 0: 修饰键（bit0=LCtrl, bit1=LShift, bit2=LAlt, bit4=RCtrl, bit5=RShift）
- *   字节 1: 保留（0）
- *   字节 2-7: 最多 6 个按键用法码（0=无按键）
- *
- * 按键是"电平"状态而非事件：新报告里有、旧报告里没有的键 = 按下。
- * 解析后重新提交中断传输以维持轮询。
- */
+/* 中断传输回调。报告 8 字节：byte0 修饰键（bit1/5=Shift）、
+ * byte2-7 最多 6 个用法码。按键是电平状态：新旧报告比对出"按下"，
+ * 解析完重提交维持轮询。 */
 static void usb_kb_callback(usb_urb_t *urb) {
     uint8_t *r = (uint8_t*)urb->buffer;
     bool shift = (r[0] & 0x02) || (r[0] & 0x20);   /* LShift / RShift */
@@ -224,15 +197,10 @@ void usb_keyboard_poll(void) {
     usb_poll();
 }
 
-/* ========== USB HID 初始化 ========== */
+/* ---- USB HID 初始化 ---- */
 
-/**
- * usb_hid_init - 扫描 USB 设备列表，识别所有 HID 设备
- *
- * 遍历设备链表，对每个设备判断是否为 HID 类设备
- * （bDeviceClass == 0x03，或 bDeviceClass == 0x00 但接口包含 HID），
- * 找到后设置配置。当前仅打印设备信息，不启动中断传输。
- */
+/* 扫设备列表认领 HID 设备（类码 0x03，或 0x00 时查接口描述符），
+ * 找到即设置配置。当前只打印信息，不起中断传输。 */
 void usb_hid_init(void) {
     vga_write("[USB HID] Scanning for HID devices...\n");
 

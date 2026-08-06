@@ -1,34 +1,7 @@
 /*
- * ============================================================
- * fat.c — FAT 文件系统驱动程序
- * ============================================================
- *
- * 本文件实现了 FAT12 / FAT16 / FAT32 文件系统的核心功能：
- * BPB 解析 → FAT 类型检测 → 簇链遍历 → 目录读取（根目录/子目录）
- * → 8.3 文件名查找 → 文件数据加载/写入 → 目录创建/删除。
- *
- * FAT 文件系统布局（磁盘视角，LBA 扇区编号递增）：
- *
- *   ┌──────────────┐ ← LBA 0（引导扇区 / BPB）
- *   │  保留区       │   由 BPB.reserved_sectors 指定大小
- *   ├──────────────┤ ← LBA BPB.reserved_sectors
- *   │  FAT #1      │   文件分配表（第1份）
- *   ├──────────────┤ ← + BPB.fat_size_16/32
- *   │  FAT #2      │   文件分配表（第2份，冗余备份）
- *   ├──────────────┤ ← + BPB.fat_size_16/32
- *   │  根目录区     │   FAT12/16：固定位置、固定大小（由 root_entry_count 决定）
- *   │              │   FAT32：根目录是一般的簇链，不存在此固定区域
- *   ├──────────────┤ ← first_data_sector（数据区起始）
- *   │  数据区       │   簇 #2 从此开始（簇 #0 和 #1 保留）
- *   │  (簇 #2..N)  │   每个簇包含 sectors_per_cluster 个扇区
- *   └──────────────┘
- *
- * 三个 FAT 变体的关键区别：
- *   特性         FAT12          FAT16          FAT32
- *   ───────────────────────────────────────────────────
- *   表项大小     12位(1.5字节)  16位(2字节)    28位有效(4字节)
- *   根目录位置   固定区域       固定区域       数据区的普通簇链
- * ============================================================
+ * fat.c - FAT12/16/32 文件系统驱动
+ * BPB 解析、类型检测、簇链遍历、目录读写、8.3 文件名查找、
+ * 文件加载/写入、目录创建/删除。
  */
 
 #include "../include/driver/ata.h"
@@ -39,27 +12,20 @@
 #include <stdbool.h>
 #include "../include/driver/irqlock.h"
 
-/* ============================================================
- *  全局变量定义（fat_init() 中初始化）
- * ============================================================ */
+/* 全局状态，fat_init() 里填 */
+static fat_bpb_t bpb;
+static uint32_t first_data_sector;       /* 数据区起始 LBA */
+static uint32_t root_dir_sectors;        /* FAT12/16 根目录占用的扇区数 */
+static uint32_t total_sectors;
+static uint32_t fat_size;                /* 每份 FAT 的扇区数 */
+static uint32_t sectors_per_cluster;
+static uint32_t bytes_per_sector;
+static uint32_t root_dir_entries;
+static fat_type_t fs_type = FAT_UNKNOWN;
+static bool fat_initialized = false;
+static uint32_t root_cluster = 0;        /* FAT32 根目录起始簇 */
+static uint8_t sector_buffer[512];       /* 单扇区缓冲 */
 
-static fat_bpb_t bpb;                    /**< BPB 副本 */
-static uint32_t first_data_sector;       /**< 数据区起始扇区 LBA */
-static uint32_t root_dir_sectors;        /**< 根目录占用的扇区数（FAT12/16） */
-static uint32_t total_sectors;           /**< 文件系统总扇区数 */
-static uint32_t fat_size;                /**< 每份 FAT 的扇区数 */
-static uint32_t sectors_per_cluster;     /**< 每簇扇区数 */
-static uint32_t bytes_per_sector;        /**< 每扇区字节数（通常 512） */
-static uint32_t root_dir_entries;        /**< 根目录最大条目数（FAT12/16） */
-static fat_type_t fs_type = FAT_UNKNOWN; /**< 检测到的 FAT 类型 */
-static bool fat_initialized = false;     /**< 初始化标志 */
-static uint32_t root_cluster = 0;        /**< FAT32 根目录起始簇号 */
-static uint8_t sector_buffer[512];       /**< 单扇区缓冲区 */
-
-
-/* ============================================================
- *  辅助函数：读/写扇区（封装 ATA 驱动）
- * ============================================================ */
 static bool read_sector(uint32_t lba, void* buffer) {
     return ata_read_sector(lba, (uint8_t*)buffer);
 }
@@ -68,21 +34,15 @@ static bool write_sector(uint32_t lba, const void* buffer) {
     return ata_write_sector(lba, (const uint8_t*)buffer);
 }
 
-
-/* ============================================================
- *  读取 FAT 表项
- *  FAT12: 12 位/项（1.5 字节，奇偶 cluster 取高/低 12 位）
- *  FAT16: 16 位/项（直接偏移）
- *  FAT32: 32 位/项（低 28 位有效）
- * ============================================================ */
+/* FAT12 项 1.5 字节（奇偶簇取高/低 12 位）；FAT16 直接偏移；
+ * FAT32 4 字节仅低 28 位有效 */
 static uint32_t read_fat_entry(uint32_t cluster) {
     if (fs_type == FAT12) {
         uint32_t fat_offset = cluster * 3 / 2;
         uint32_t byte_off   = fat_offset % bytes_per_sector;
         uint32_t fat_sector = bpb.reserved_sectors + fat_offset / bytes_per_sector;
-        /* ⚠️ 修复：FAT12 表项可能跨扇区边界（奇簇时 fat_offset 落在
-         * 扇区末尾，低字节在 511、高字节在下一扇区 0）。旧实现直接
-         * *(uint16_t*)(sector_buffer+511) 越界读 1 字节。 */
+        /* ⚠️ FAT12 表项可能跨扇区边界（奇簇时低字节落在 511、高字节在
+         * 下一扇区 0），旧实现 *(uint16_t*)(sector_buffer+511) 越界读。 */
         uint8_t b0, b1;
         if (byte_off + 1 < bytes_per_sector) {
             if (!read_sector(fat_sector, sector_buffer)) return 0x0FFFFFFF;
@@ -114,11 +74,7 @@ static uint32_t read_fat_entry(uint32_t cluster) {
     return 0x0FFFFFFF;
 }
 
-
-/* ============================================================
- *  FAT 类型数值推断（微软规范）：
- *   总簇数 < 4085 → FAT12；< 65525 → FAT16；否则 FAT32
- * ============================================================ */
+/* 微软规范阈值：总簇数 <4085 → FAT12，<65525 → FAT16，否则 FAT32 */
 static fat_type_t detect_fat_type(void) {
     if (bpb.bytes_per_sector != 512) {
         vga_write("[FAT] Warning: bytes_per_sector != 512, may not be FAT.\n");
@@ -147,12 +103,7 @@ static fat_type_t detect_fat_type(void) {
     else return FAT32;
 }
 
-
-/* ============================================================
- *  FAT 文件系统初始化
- *  读取 BPB → 校验 0x55AA 签名 → 检测 FAT 类型（字符串优先，
- *  数值推断兜底）→ 计算全局常量。
- * ============================================================ */
+/* 读 BPB、验 0x55AA 签名、定 FAT 类型（字符串优先，数值推断兜底） */
 bool fat_init(void) {
     if (!read_sector(0, sector_buffer)) {
         vga_write("[FAT] Failed to read boot sector.\n");
@@ -232,18 +183,12 @@ fat_type_t fat_get_type(void) {
     return t;
 }
 
-
-/* ============================================================
- *  转大写辅助
- * ============================================================ */
 static char to_upper(char c) {
     if (c >= 'a' && c <= 'z') return c - 'a' + 'A';
     return c;
 }
 
-/**
- * make_83_name - 将文件名转换为 8.3 格式（大写、右补空格）
- */
+/* 转 8.3 格式：大写、右补空格 */
 static void make_83_name(const char* filename, char name_83[12]) {
     for (int i = 0; i < 11; i++) name_83[i] = ' ';
     name_83[11] = '\0';
@@ -259,24 +204,8 @@ static void make_83_name(const char* filename, char name_83[12]) {
     }
 }
 
-
-/* ============================================================
- *  读取任意目录（通用版）
- *
- *  @dir_cluster: 目录所在的首簇号；0 = 根目录（FAT12/16 固定区或 FAT32 根簇）
- *  @entries:     输出缓冲区
- *  @max_entries: 缓冲区容量
- *  返回：读到的目录项数量（跳过 0xE5 已删除项；0x00 后停止）
- *
- *  目录项结构（32 字节）：
- *    偏移  大小  说明
- *    0      8    文件名（8字节，不足补空格）
- *    8      3    扩展名（3字节，不足补空格）
- *    11     1    属性（0x10=目录，0x20=归档）
- *    26     2    首簇号低16位
- *    28     4    文件大小（字节）
- *  特殊标记：0x00=目录项及其后为空；0xE5=已删除；0x2E="."/".."
- * ============================================================ */
+/* 读任意目录：0=根目录（FAT12/16 固定区或 FAT32 根簇），跟随簇链。
+ * 跳过 0xE5 已删除项，遇 0x00 停止。 */
 uint32_t fat_read_dir(uint32_t dir_cluster, fat_dirent_t* entries, uint32_t max_entries) {
     uint32_t fl = irq_lock();
     if (!fat_initialized || !entries || max_entries == 0) { irq_unlock(fl); return 0; }
@@ -317,23 +246,16 @@ uint32_t fat_read_dir(uint32_t dir_cluster, fat_dirent_t* entries, uint32_t max_
     return index;
 }
 
-/**
- * fat_read_root_dir - 读取根目录所有条目（兼容包装）
- */
+/* 根目录条目（兼容包装） */
 uint32_t fat_read_root_dir(fat_dirent_t* entries, uint32_t max_entries) {
     return fat_read_dir(0, entries, max_entries);
 }
 
-
-/* ⚠️ 目录扫描缓冲：绝不能放在栈上——fat_dirent_t 128 项 = 4KB，
- * 而每个任务的内核栈只有 4KB（用户态中断栈），栈数组会把栈写穿
- * 到栈页之下（PCB 页），是定时炸弹（实测侥幸未炸）。
+/* ⚠️ 目录扫描缓冲绝不能放栈上：128 项 = 4KB，而每个任务的内核栈只有
+ * 4KB，栈数组会写穿到栈页之下（PCB 页），是定时炸弹（实测侥幸未炸）。
  * 内核单线程，全局缓冲安全。 */
 static fat_dirent_t dir_scan_entries[128];
 
-/* ============================================================
- *  在指定目录中按 8.3 名查找（内部）
- * ============================================================ */
 static bool dir_find_name(uint32_t dir_cluster, const char* name_83, fat_dirent_t* out_entry) {
     uint32_t count = fat_read_dir(dir_cluster, dir_scan_entries, 128);
     for (uint32_t k = 0; k < count; k++) {
@@ -347,13 +269,8 @@ static bool dir_find_name(uint32_t dir_cluster, const char* name_83, fat_dirent_
     return false;
 }
 
-
-/* ============================================================
- *  在目录中找“同名项”或“空闲槽”（内部）
- *  返回：1 = 找到同名项；2 = 找到空闲槽（0x00 或 0xE5）；
- *        0 = 目录满（簇链耗尽，需 dir_extend 扩展）
- *  位置通过 out_lba / out_offset 返回（供写回）。
- * ============================================================ */
+/* 找同名项或空闲槽（0x00/0xE5），位置经 out_lba/out_offset 返回。
+ * 返回 1=同名项，2=空闲槽，0=目录满（需 dir_extend）。 */
 static int dir_find_slot(uint32_t dir_cluster, const char* name_83,
                          uint32_t* out_lba, uint32_t* out_offset) {
     uint32_t cluster = dir_cluster;
@@ -394,10 +311,7 @@ static int dir_find_slot(uint32_t dir_cluster, const char* name_83,
     return 0;   /* 目录满 */
 }
 
-
-/* ============================================================
- *  写入一个 FAT 表项（FAT1 写入后同步镜像到 FAT2 对应扇区）
- * ============================================================ */
+/* 写 FAT 表项；FAT1 写完后同步镜像到 FAT2 对应扇区 */
 static void write_fat_entry(uint32_t cluster, uint32_t value) {
     uint32_t fat_offset, fat_sector, offset;
 
@@ -424,7 +338,7 @@ static void write_fat_entry(uint32_t cluster, uint32_t value) {
         fat_offset = cluster * 3 / 2;
         fat_sector = bpb.reserved_sectors + fat_offset / bytes_per_sector;
         offset = fat_offset % bytes_per_sector;
-        /* ⚠️ 修复：同 read_fat_entry——FAT12 项可能跨扇区边界，
+        /* ⚠️ 同 read_fat_entry：FAT12 项可能跨扇区边界，
          * 旧实现 *(uint16_t*)(sector_buffer+511) 越界写。 */
         uint8_t b0, b1, old_lo = 0, old_hi = 0;
         if (offset + 1 < bytes_per_sector) {
@@ -463,10 +377,7 @@ static void write_fat_entry(uint32_t cluster, uint32_t value) {
     }
 }
 
-
-/* ============================================================
- *  扩展目录：分配一个新簇接在目录簇链尾部，返回新簇首扇区 LBA
- * ============================================================ */
+/* 目录簇链尾接一个新簇，返回新簇首扇区 LBA */
 static bool dir_extend(uint32_t dir_cluster, uint32_t* new_lba) {
     /* 找链尾 */
     uint32_t cluster = dir_cluster;
@@ -497,17 +408,9 @@ static bool dir_extend(uint32_t dir_cluster, uint32_t* new_lba) {
     return false;   /* 磁盘满 */
 }
 
-
-/* ============================================================
- *  路径解析（内部核心）：
- *  把 "DIR1/DIR2/FILE" 拆成父目录簇号 + 末段 8.3 名。
- *
- *  返回：父目录簇号（0 = 根目录）；
- *        out_name_83  ← 末段文件名（8.3）；
- *        out_entry    ← 末段目录项（若已存在）；
- *        *exists      ← 末段是否已存在。
- *  失败（中间路径段不存在 / 中间段不是目录）返回 0xFFFFFFFF。
- * ============================================================ */
+/* 路径解析：把 "DIR1/DIR2/FILE" 拆成父目录簇号 + 末段 8.3 名。
+ * 返回父目录簇号（0=根）；末段存在与否写入 *exists；
+ * 中间段缺失/不是目录返回 0xFFFFFFFF。 */
 static uint32_t fat_resolve_parent(const char* path, char out_name_83[12],
                                    fat_dirent_t* out_entry, bool* exists) {
     if (!path || path[0] == '\0') return 0xFFFFFFFF;
@@ -560,12 +463,7 @@ static uint32_t fat_resolve_parent(const char* path, char out_name_83[12],
     return 0xFFFFFFFF;   /* 空路径 */
 }
 
-
-/* ============================================================
- *  fat_open_dir - 解析目录路径，返回目录首簇号
- *  @path: 目录路径（NULL/空 = 根目录）
- *  返回：目录簇号（根目录 = 0）；失败（不存在或不是目录）返回 0xFFFFFFFF。
- * ============================================================ */
+/* 解析目录路径，返回目录首簇号（根=0）；不存在/不是目录返回 0xFFFFFFFF */
 uint32_t fat_open_dir(const char* path) {
     uint32_t fl = irq_lock();
     if (!path || path[0] == '\0') { irq_unlock(fl); return 0; }
@@ -601,11 +499,7 @@ uint32_t fat_open_dir(const char* path) {
     return cur;
 }
 
-
-/* ============================================================
- *  fat_find_file - 查找文件（支持 "DIR/FILE" 路径）
- *  流程：路径解析 → 末段 8.3 名匹配。找到返回 true 并填充目录项。
- * ============================================================ */
+/* 查找文件（支持 "DIR/FILE"）：路径解析 + 末段 8.3 名匹配 */
 bool fat_find_file(const char* filename, fat_dirent_t* out_entry) {
     uint32_t fl = irq_lock();
     if (!fat_initialized || !filename || !out_entry) { irq_unlock(fl); return false; }
@@ -620,14 +514,8 @@ bool fat_find_file(const char* filename, fat_dirent_t* out_entry) {
     return true;
 }
 
-
-/* ============================================================
- *  加载文件数据到内存缓冲区
- *
- *  核心过程——"簇链遍历"：
- *    首簇 → FAT[next] → 第2簇 → FAT[next] → ... → EOF
- *    簇 N 的扇区 = first_data_sector + (N-2) * sectors_per_cluster
- * ============================================================ */
+/* 沿簇链读文件：首簇 → FAT[next] → ... → EOF。
+ * 簇 N 的扇区 = first_data_sector + (N-2) * sectors_per_cluster */
 uint32_t fat_load_file(const fat_dirent_t* entry, void* buffer, uint32_t max_size) {
     uint32_t fl = irq_lock();
     if (!fat_initialized || !entry || !buffer || max_size == 0) { irq_unlock(fl); return 0; }
@@ -661,10 +549,7 @@ uint32_t fat_load_file(const fat_dirent_t* entry, void* buffer, uint32_t max_siz
     return file_size - remaining;
 }
 
-
-/* ============================================================
- *  fat_free_chain - 释放一条簇链（全部表项写 0x0000，含 FAT2 镜像）
- * ============================================================ */
+/* 整条簇链表项写 0，含 FAT2 镜像 */
 static void fat_free_chain(uint32_t first_cluster) {
     uint32_t c = first_cluster;
     uint32_t guard = 0;
@@ -676,12 +561,7 @@ static void fat_free_chain(uint32_t first_cluster) {
     }
 }
 
-
-/* ============================================================
- *  fat_delete_file - 删除文件或空目录（支持 "DIR/FILE" 路径）
- *  流程：解析路径 → 找目录项 → 标记 0xE5 → 释放 FAT 簇链。
- *  目录只有为空（仅含 '.'/'..'）时才能删除。
- * ============================================================ */
+/* 删除文件或空目录：标记 0xE5 + 释放簇链。目录只有空（仅 '.'/'..'）才能删 */
 bool fat_delete_file(const char* filename) {
     if (!fat_initialized || !filename) return false;
 
@@ -698,14 +578,12 @@ bool fat_delete_file(const char* filename) {
     if (!read_sector(lba, sector_buffer)) return false;
     fat_dirent_t* e = (fat_dirent_t*)(sector_buffer + offset);
 
-    /* 先拷贝需要的数据——sector_buffer 会被后续调用污染！ */
+    /* 先拷出需要的数据——sector_buffer 会被后续调用污染 */
     uint32_t first_cluster = (e->cluster_high << 16) | e->cluster_low;
     bool is_dir = (e->attributes & 0x10) != 0;
 
-    /* 目录：检查是否为空（只含 '.' 和 '..'）。
-     * 注意：fat_read_dir 会复用 sector_buffer，因此空检查放在
-     * 修改目录项之前，且之后必须重新读扇区。
-     * ⚠️ 用全局 dir_scan_entries（不能放栈上，4KB 会压爆内核栈）。 */
+    /* 目录：先查是否为空。fat_read_dir 会复用 sector_buffer，
+     * 所以空检查必须在改目录项之前，之后要重新读扇区。 */
     if (is_dir && first_cluster >= 2) {
         uint32_t n = fat_read_dir(first_cluster, dir_scan_entries, 128);
         for (uint32_t i = 0; i < n; i++) {
@@ -723,15 +601,8 @@ bool fat_delete_file(const char* filename) {
     return true;
 }
 
-
-/* ============================================================
- *  fat_write_file - 新建/覆盖文件（支持 "DIR/FILE" 路径）
- *
- *  流程：解析路径 → 在父目录找空闲项（或同名项覆盖）→
- *        释放旧簇链（覆盖时）→ 分配新簇链 → 写 FAT（含镜像）
- *        → 写数据扇区 → 填目录项。
- *  返回 true=成功，false=失败（空间不足 / 路径不存在 / 不能覆盖目录）。
- * ============================================================ */
+/* 新建/覆盖文件：找空闲项（或同名覆盖）→ 释放旧链（覆盖时）→
+ * 分配新簇链 → 写 FAT（含镜像）→ 写数据 → 填目录项 */
 static bool fat_write_file_impl(const char* filename, const void* data, uint32_t size) {
     if (!fat_initialized || !filename || !data) return false;
 
@@ -744,7 +615,7 @@ static bool fat_write_file_impl(const char* filename, const void* data, uint32_t
     uint32_t data_sectors = total_sectors - (bpb.reserved_sectors + bpb.num_fats * fat_size + root_dir_sectors);
     uint32_t max_cluster = 2 + data_sectors / sectors_per_cluster;
 
-    /* 在父目录中找空闲项或同名项；目录满则扩展 */
+    /* 找空闲项或同名项；目录满则扩展 */
     uint32_t entry_sector = 0, entry_offset = 0;
     bool overwriting = false;
     uint32_t old_first_cluster = 0;
@@ -784,10 +655,10 @@ static bool fat_write_file_impl(const char* filename, const void* data, uint32_t
     }
     if (prev_cluster) write_fat_entry(prev_cluster, 0xFFF8);   /* 链尾标记 */
 
-    /* 覆盖时释放旧簇链（在新链分配成功之后，避免中途失败丢数据） */
+    /* 覆盖时释放旧链（在新链分配成功之后，避免中途失败丢数据） */
     if (overwriting && old_first_cluster >= 2) fat_free_chain(old_first_cluster);
 
-    /* 写入数据扇区（最后一簇不足的部分补零） */
+    /* 写数据扇区（最后一簇不足的部分补零） */
     const uint8_t* src = (const uint8_t*)data;
     uint32_t remaining = size;
     uint32_t c = first_cluster;
@@ -798,7 +669,7 @@ static bool fat_write_file_impl(const char* filename, const void* data, uint32_t
             uint32_t copy = (remaining < bytes_per_sector) ? remaining : bytes_per_sector;
             memcpy(sector_buffer, src, copy);
             if (!write_sector(lba + s, sector_buffer)) {
-                /* ⚠️ 修复：写扇区失败时释放已分配的簇链，避免磁盘空间永久泄漏 */
+                /* ⚠️ 写扇区失败时释放已分配的簇链，避免磁盘空间永久泄漏 */
                 fat_free_chain(first_cluster);
                 return false;
             }
@@ -838,14 +709,8 @@ bool fat_write_file(const char* filename, const void* data, uint32_t size) {
     return r;
 }
 
-
-/* ============================================================
- *  fat_mkdir - 创建子目录（支持 "DIR1/DIR2" 多级路径，最后一级为新建目标）
- *
- *  流程：解析路径 → 分配一簇清零 → 写 '.'（指向自己）和 '..'（指向父目录）
- *        → 在父目录找空闲项（满则扩展）→ 填目录项（属性 0x10）。
- *  返回 true=成功，false=失败（已存在 / 中间路径不存在 / 空间不足）。
- * ============================================================ */
+/* 建子目录：分配一簇清零 → 写 '.'（指向自己）'..'（指向父）→
+ * 父目录找空闲项（满则扩展）→ 填目录项（属性 0x10） */
 static bool fat_mkdir_impl(const char* path) {
     if (!fat_initialized || !path) return false;
 
@@ -888,7 +753,7 @@ static bool fat_mkdir_impl(const char* path) {
     dotdot.cluster_low = (uint16_t)(parent_cluster & 0xFFFF);
     dotdot.cluster_high = (uint16_t)((parent_cluster >> 16) & 0xFFFF);
 
-    /* ⚠️ 修复：以下各失败点统一释放已分配的 new_cluster，避免泄漏 */
+    /* ⚠️ 以下各失败点统一释放 new_cluster，避免泄漏 */
     if (!read_sector(lba, sector_buffer)) { fat_free_chain(new_cluster); return false; }
     memcpy(sector_buffer, &dot, sizeof(dot));
     memcpy(sector_buffer + 32, &dotdot, sizeof(dotdot));

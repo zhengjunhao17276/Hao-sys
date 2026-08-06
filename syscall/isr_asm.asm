@@ -1,22 +1,8 @@
-; =============================================================================
-; isr_asm.asm - 中断服务例程（异常、IRQ、系统调用）
+; isr_asm.asm - 异常/IRQ/系统调用处理（NASM 宏批量生成）
 ;
-; 本文件使用 NASM 宏批量生成中断处理程序，以减少重复代码。
-;
-; 异常处理（Exception）：
-;   每个异常处理程序在 VGA 终端打印 "EX:XX"（XX 是异常号），
-;   然后进入无限 HLT 循环。异常意味着内核有 bug 或硬件问题，
-;   不应继续执行。
-;
-; IRQ 处理：
-;   IRQ 是硬件中断请求，由 PIC 转发到 CPU。本驱动器特殊处理
-;   IRQ1（键盘）和 IRQ12（鼠标），转发给 C 函数处理，其余 IRQ
-;   直接发送 EOI。
-;
-; 系统调用（int 0x80）：
-;   保存所有寄存器后调用 syscall_dispatcher()，完成后恢复并返回。
-;   这是用户态与内核通信的唯一通道。
-; =============================================================================
+; 异常：打印 "EX:XX" 后死循环（异常 = 内核 bug，不应继续执行）
+; IRQ：IRQ1 键盘、IRQ12 鼠标转 C 处理，IRQ7/15 查伪中断，其余直接 EOI
+; int 0x80：保存全部寄存器后调 syscall_dispatcher
 
 extern keyboard_irq_handler
 extern ps2_mouse_irq_handler
@@ -28,36 +14,17 @@ extern current_task
 
 section .text
 
-; =============================================================================
-; 异常处理宏：EXCEPTION num
-; 生成一个处理特定 CPU 异常的汇编函数。
-; CPU 异常包括除零错（#DE, 0）、一般保护错误（#GP, 13）、
-; 页错误（#PF, 14）等。
-;
-; 发生异常时：
-;   1. 丢弃 CPU 压入的错误码（#8/#10-#14/#17 才有）
-;   2. 用 pusha 保存所有通用寄存器
-;   3. 在 VGA 终端左上角打印 "EX:XX" + 栈上几个关键值（含 EIP）
-;   4. 进入无限 HLT（异常意味着内核 bug，不应继续执行）
-;
-; ⚠️ 错误码异常（#DB 除外）：#8 双重故障、#10 无效 TSS、#11 段不存在、
-;    #12 栈段错误、#13 一般保护、#14 页错误、#17 对齐检查 会由 CPU
-;    在压入 EIP/CS/EFLAGS 之前先压入一个 4 字节错误码。
-;    若不丢弃，pusha 后的栈偏移全部错位——打印的 "EIP" 会读到错误码。
-;    页错误（#PF）时尤其重要：EIP 错一个字节都定位不到真正的出错指令。
-;
-; 统一后的栈布局（从低到高，相对 pusha 后的 esp）：
-;   pusha 压入的 8 个 regs (32 字节)
-;   EIP   (4 字节)  ← 偏移 32：异常发生时正在执行的指令地址
-;   CS    (4 字节)  ← 偏移 36
-;   EFLAGS(4 字节)  ← 偏移 40
-;   （若从 ring3 触发）用户 ESP ← 偏移 44
-; =============================================================================
+; EXCEPTION num, has_error_code
+; 带错误码的异常（8/10/11/12/13/14/17）CPU 会先压 4 字节错误码，
+; 必须丢弃，否则 pusha 后栈偏移错位——打印的 "EIP" 会读到错误码，
+; 页错误时 EIP 错一个字节都定位不到出错指令。
+; pusha 后栈布局（esp 起）：8 个 regs(32B) / EIP@32 / CS@36 / EFLAGS@40
+; （ring3 触发时还有用户 ESP@44）
 %macro EXCEPTION 2   ; %1 = 异常号, %2 = 是否压入错误码 (1=是, 0=否)
 global exc%1_handler
 exc%1_handler:
     %if %2
-        ; 该异常带错误码：先丢弃，统一后续栈偏移
+        ; 带错误码：先丢弃，统一后续栈偏移
         add esp, 4
     %endif
     pusha
@@ -74,9 +41,9 @@ exc%1_handler:
 
     mov ebx, %1
     mov ecx, 2
-    ; ⚠️ 修复：取 bl（低字节）打印异常号——旧代码用 bh，
-    ; 任何 ≥1 的异常都会显示成 "EX:00"，误导调试。
-    ; 高位 nibble 先打印
+    ; ⚠️ 用 bl 打印异常号——旧代码用 bh，任何 ≥1 的异常都显示成
+    ; "EX:00"，误导调试。
+    ; 高位 nibble
     mov dl, bl
     shr dl, 4
     add dl, '0'
@@ -99,9 +66,8 @@ exc%1_handler:
     mov byte [eax+1], 0x0F
     add eax, 2
 
-    ; ---- 打印栈偏移 28,32,36,40,44 的原始值 ----
-    ; pusha 后期望布局：EAX(28), EIP(32), CS(36), EFLAGS(40), ???(44)
-    ; 用 esi 基址 + 手动展开 5 次，避免预处理器循环的标签冲突
+    ; ---- 打印 [esp+28..44] 的原始值（含 EIP）----
+    ; 手动展开 5 次，避免宏内循环的标签冲突
 
     mov esi, esp
 
@@ -201,8 +167,8 @@ exc%1_handler:
     jmp .hang
 %endmacro
 
-; 批量定义异常 0-19 的处理程序
-; 第二个参数 = 是否压入错误码（8,10,11,12,13,14,17 为 1）
+; 批量定义异常 0-19；第二个参数 = 是否压入错误码
+; （8,10,11,12,13,14,17 为 1）
 EXCEPTION 0, 0
 EXCEPTION 1, 0
 EXCEPTION 2, 0
@@ -224,25 +190,13 @@ EXCEPTION 17, 1
 EXCEPTION 18, 0
 EXCEPTION 19, 0
 
-; =============================================================================
-; IRQ 处理宏：IRQ num, pic_irq_num
-; 生成一个处理特定硬件中断的汇编函数。
-;
-; 特殊处理的 IRQ：
-;   IRQ1  → 键盘中断（调用 keyboard_irq_handler）
-;   IRQ12 → 鼠标中断（调用 ps2_mouse_irq_handler）
-;   其他  → 直接发送 EOI 后返回
-;
-; CPU 接收到 IRQ 后会自动在栈上压入：
-;   SS, ESP, EFLAGS, CS, EIP（如果从用户态中断）
-;   或 EFLAGS, CS, EIP（如果从内核态中断）
-;
-; iret 指令会弹出这些值并恢复之前的执行流。
-; =============================================================================
+; IRQ num, pic_irq_num
+; IRQ1 键盘、IRQ12 鼠标转 C 处理；IRQ7/15 先查 ISR 位防伪中断；
+; 其余直接 EOI。iret 帧由 CPU 自动压（用户态中断多 SS/ESP）。
 %macro IRQ 2
 global irq%1_handler
 irq%1_handler:
-    ; ⚠️ 同 isr80_handler：先 pusha 再保存 task->esp（指向 pusha 帧，
+    ; ⚠️ 同 isr80_handler：先 pusha 再存 task->esp（指向 pusha 帧，
     ; iret 帧在正下方）。恢复时 switch_to_user 手动 pop + iret，
     ; 通用寄存器不再丢失。
     pusha
@@ -252,9 +206,9 @@ irq%1_handler:
     mov [eax], esp
     %%nosave:
     %if %1 == 0
-        ; pusha 后栈布局：内核态 CS@[esp+36]（=0x08），
-        ; 用户态 [esp+36] = 用户 ESP（栈地址，不会是 0x08）。
-        ; EOI 由 pit_tick_handler 内部发送（必须在 schedule 之前）。
+        ; pusha 后 [esp+36]：内核态 = CS(0x08)，用户态 = 用户 ESP
+        ; （栈地址，不会是 0x08）。EOI 由 pit_tick_handler 内部发
+        ; （必须在 schedule 之前）。
         cmp dword [esp+36], 0x08
         je %%kernel_ctx
         push dword 1
@@ -268,8 +222,8 @@ irq%1_handler:
         ; IRQ1 = PS/2 键盘
         call keyboard_irq_handler
     %elif %1 == 7
-        ; ⚠️ 伪中断检测：IRQ7 是伪中断（Spurious）的高发线，
-        ; ISR 位未置位说明是伪中断，此时发 EOI 会误清真实中断。
+        ; ⚠️ IRQ7 伪中断高发：ISR 位未置位说明是伪中断，
+        ; 此时发 EOI 会误清真实中断。
         push dword 7
         call pic_is_in_service
         add esp, 4
@@ -283,7 +237,7 @@ irq%1_handler:
         ; IRQ12 = PS/2 鼠标
         call ps2_mouse_irq_handler
     %elif %1 == 15
-        ; ⚠️ 伪中断检测：IRQ15（从片）同理，从片 ISR 位未置位 = 伪中断
+        ; ⚠️ IRQ15（从片）同理：从片 ISR 位未置位 = 伪中断
         push dword 15
         call pic_is_in_service
         add esp, 4
@@ -294,12 +248,12 @@ irq%1_handler:
         add esp, 4
 %%spurious15:
     %else
-        ; 其他 IRQ：直接发送 EOI 并返回
+        ; 其他 IRQ：直接 EOI 返回
         push dword %2
         call pic_send_eoi
         add esp, 4
     %endif
-    ; 手动弹出 pusha 的寄存器（避免 popa + iret 的栈偏移）
+    ; 手动弹出 pusha 的寄存器（避免 popa + iret 的栈偏移问题）
     pop edi
     pop esi
     pop ebp
@@ -311,7 +265,7 @@ irq%1_handler:
     iret
 %endmacro
 
-; 批量定义 IRQ 0-15 的处理程序
+; 批量定义 IRQ 0-15
 IRQ 0, 0
 IRQ 1, 1
 IRQ 2, 2
@@ -329,15 +283,8 @@ IRQ 13, 13
 IRQ 14, 14
 IRQ 15, 15
 
-; =============================================================================
-; isr_stub - 默认中断处理程序（用于未初始化的中断）
-;
-; 当发生一个没有专门处理程序的中断时（如 0x20-0x2F 之外的其他向量），
-; 输出 "EX:??" 表示未知中断，向主片和从片都发送 EOI，然后返回。
-;
-; 这个处理程序不会死循环——因为误触发的中断可能是硬件伪中断，
-; 返回比死循环更好（至少系统还能继续运行）。
-; =============================================================================
+; isr_stub - 未知中断：打印 "EX:??"，主从片都发 EOI 后返回。
+; 不死循环——误触发可能是硬件伪中断，返回比死循环好。
 global isr_stub
 isr_stub:
     pusha
@@ -348,7 +295,7 @@ isr_stub:
     mov word [eax+4], 0x0F00 | ':'
     mov word [eax+6], 0x0F00 | '?'
     mov word [eax+8], 0x0F00 | '?'
-    ; 保守地发送两个 EOI（主片 + 从片）
+    ; 保守地发两个 EOI（主片 + 从片）
     push 0x20
     call pic_send_eoi
     add esp, 4
@@ -358,57 +305,42 @@ isr_stub:
     popa
     iret
 
-; =============================================================================
-; isr80_handler - 系统调用处理程序（int 0x80）
-;
-; 系统调用的入口点。用户态程序执行 "int $0x80" 时，CPU 会：
-;   1. 从 TSS 加载内核栈（SS0/ESP0）→ 切换到内核栈
-;   2. 压入用户态的 SS, ESP, EFLAGS, CS, EIP
-;   3. 跳转到 isr80_handler（CS=0x08, EIP=isr80_handler）
-;
-; 处理流程：
-;   1. pusha 保存通用寄存器
-;   2. 保存段寄存器 DS, ES, FS, GS
-;   3. 将当前 ESP（regs_t 结构体指针）作为参数传给 syscall_dispatcher
-;   4. 调用 syscall_dispatcher（C 函数，进行具体分发）
-;   5. 恢复段寄存器
-;   6. popa 恢复通用寄存器（eax 中包含 syscall 返回值）
-;   7. iret 返回用户态
-;
-; 注意：regs_t 结构体的布局必须与 pusha + push ds/es/fs/gs 的顺序一致。
-; =============================================================================
+; isr80_handler - int 0x80 入口。
+; 用户态 int 0x80 时 CPU 经 TSS 换到内核栈，压入 SS/ESP/EFLAGS/CS/EIP。
+; 流程：pusha → 存 task->esp → 压段寄存器 → 把 regs_t* 传给
+; syscall_dispatcher → 恢复 → popa（eax=返回值）→ iret。
+; ⚠️ regs_t 的字段顺序必须与这里的压栈顺序一致。
 global isr80_handler
 isr80_handler:
-    ; ⚠️ 保存用户任务上下文：task->esp 指向 pusha 帧（iret 帧在其正下方）。
-    ; 恢复时（switch_to_user）手动 pop 寄存器后 iret——裸 iret 只恢复
-    ; EIP/CS/EFLAGS/ESP/SS，通用寄存器会丢失（实测：抢占发生在 putchar
-    ; 中途，EAX 里的字符被内核残留值覆盖 → 用户态写垃圾地址 → #GP）。
-    pusha                       ; push EAX, ECX, EDX, EBX, ESP, EBP, ESI, EDI
+    ; ⚠️ 保存用户任务上下文：task->esp 指向 pusha 帧（iret 帧在正下方）。
+    ; 裸 iret 只恢复 EIP/CS/EFLAGS/ESP/SS，通用寄存器会丢（实测：
+    ; 抢占发生在 putchar 中途，EAX 被内核残留值覆盖 → 用户态写垃圾
+    ; 地址 → #GP）。
+    pusha
     mov eax, [current_task]
     test eax, eax
     jz .no_save
     mov [eax], esp
 .no_save:
-    push ds                     ; 保存数据段寄存器
+    push ds                     ; 保存段寄存器
     push es
     push fs
     push gs
-    push esp                    ; 将当前栈指针（regs_t*）作为参数传递
+    push esp                    ; 当前栈指针即 regs_t*，作参数传入
     call syscall_dispatcher
     add esp, 4                  ; 清理参数
     pop gs
     pop fs
     pop es
     pop ds
-    ; 手动弹出 pusha 的寄存器（代替 popa，跳过 ESP 槽避免破坏栈指针）
-    ; 当前 ESP = IRET_PTR - 32（指向 pusha 的 EDI）
-    pop edi                     ; 弹出 EDI
-    pop esi                     ; 弹出 ESI
-    pop ebp                     ; 弹出 EBP
-    add esp, 4                  ; 跳过保存的 ESP（不需要恢复 ESP_orig）
-    pop ebx                     ; 弹出 EBX
-    pop edx                     ; 弹出 EDX
-    pop ecx                     ; 弹出 ECX
-    pop eax                     ; 弹出 EAX（syscall 返回值）
-    ; 现在 ESP = IRET_PTR，正好指向 IRET 帧的 EIP 位置
+    ; 手动弹出 pusha 的寄存器（跳过 ESP 槽，popa 会破坏栈指针）
+    pop edi
+    pop esi
+    pop ebp
+    add esp, 4
+    pop ebx
+    pop edx
+    pop ecx
+    pop eax                     ; eax = syscall 返回值
+    ; 现在 ESP 正好指向 IRET 帧的 EIP 位置
     iret                        ; 返回用户态

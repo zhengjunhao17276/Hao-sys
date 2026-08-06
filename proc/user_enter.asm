@@ -1,27 +1,21 @@
-; =============================================================================
-; user_enter.asm - 通过 IRET 切换到用户态
-;
+; user_enter.asm - 直接 iret 进 ring3
 ; void user_enter(uint32_t eip, uint32_t esp);
-; =============================================================================
 
 global user_enter
 
 section .text
 
 user_enter:
-    ; 立即关中断，不让任何中断干扰
-    cli
+    cli                     ; 关中断，避免 iret 前被打断
 
-    ; 从栈上读参数
-    mov eax, [esp + 4]     ; eax = eip (用户代码入口)
-    mov edx, [esp + 8]     ; edx = esp (用户栈指针)
+    mov eax, [esp + 4]      ; eip
+    mov edx, [esp + 8]      ; esp
 
-    ; 构造 IRET 帧
-    push dword 0x23         ; SS = 用户数据段 (ring 3)
+    ; 搭 iret 帧（弹出顺序 EIP,CS,EFLAGS,ESP,SS → 反着压）
+    push dword 0x23         ; SS  = 用户数据段 (ring3)
     push edx                ; ESP
     push dword 0x200        ; EFLAGS (IF=1)
-    push dword 0x1B         ; CS = 用户代码段 (ring 3)
+    push dword 0x1B         ; CS  = 用户代码段 (ring3)
     push eax                ; EIP
 
-    ; 执行 IRET，切换到 ring 3
-    iret
+    iret                    ; 切到 ring3

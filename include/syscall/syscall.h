@@ -1,32 +1,7 @@
-/**
- * =========================================================================
- * syscall.h - 系统调用接口定义
- *
- * 系统调用（syscall）是用户态程序请求内核服务的标准方式。
- * HaoOS 使用 int 0x80 软中断实现系统调用，这是 Linux 经典做法。
- *
- * 调用约定：
- *   - eax = 系统调用号
- *   - ebx = 参数 1
- *   - ecx = 参数 2（可选）
- *   - edx = 参数 3（可选）
- *   - 返回值放在 eax 中
- *
- * 用户态使用方式（C 内联汇编）：
- *   int result;
- *   __asm__ volatile ("int $0x80" : "=a"(result) : "a"(SYS_PUTCHAR), "b"('A'));
- *
- * 寄存器上下文（由汇编中断处理程序压栈后传递给 C 分发器）：
- *   isr_asm.asm 中的 isr80_handler 会将所有段寄存器和通用寄存器
- *   压入栈中，形成 regs_t 结构体的布局，然后调用 syscall_dispatcher()。
- *
- * 当前实现的系统调用：
- *   SYS_PUTCHAR - 输出一个字符
- *   SYS_GETCHAR - 获取一个键盘输入
- *   SYS_WRITE   - 输出字符串
- *   SYS_EXIT    - 退出程序
- *   SYS_READ_SECT - 读磁盘扇区（预留演示用）
- * =========================================================================
+/*
+ * syscall.h - 系统调用接口（int 0x80）
+ * eax=调用号，ebx/ecx/edx=参数，返回值在 eax。
+ * 用户态：__asm__ volatile ("int $0x80" : "=a"(ret) : "a"(nr), "b"(arg1));
  */
 
 #ifndef SYSCALL_H
@@ -63,50 +38,34 @@
 #define SYS_YIELD      26 /* 让出 CPU（协作式调度；返回值不可用） */
 #define SYS_USB_INFO   27 /* 打印 USB 设备列表 + MSC 状态 */
 
-/**
- * regs_t - 寄存器上下文结构体
- *
- * ⚠️ 字段顺序必须与 isr_asm.asm 中 isr80_handler 的压栈顺序一致！
- *
- * 栈布局（从低地址到高地址）：
- *   [gs] [fs] [es] [ds] ← 后压入的段寄存器
- *   [EDI] [ESI] [EBP] [ESP] [EBX] [EDX] [ECX] [EAX] ← pusha 顺序
- *
- * pusha 指令先压 EAX（最高地址），后压 EDI（最低地址）。
- * 在 C 结构体中，偏移最小的字段 = 最低地址 = 最后压入的值。
- * 所以通用寄存器部分要**反着写**：EDI 在最前面，EAX 在最后。
+/*
+ * regs_t - 中断上下文（由 isr80_handler 压栈形成）
+ * ⚠️ 字段顺序必须与 isr_asm.asm 的压栈顺序一致！
+ * 压栈顺序：push gs/fs/es/ds → pusha（EAX 先压，占最高地址）。
+ * 结构体偏移最小 = 最后压入 → EDI 在前、EAX 在后。
  */
 typedef struct {
-    uint32_t gs;      /* 偏移  0：段寄存器 GS（push gs 最后压入） */
-    uint32_t fs;      /* 偏移  4：段寄存器 FS */
-    uint32_t es;      /* 偏移  8：段寄存器 ES */
-    uint32_t ds;      /* 偏移 12：段寄存器 DS */
-    uint32_t edi;     /* 偏移 16：pusha 最后压入 → 在最低地址 */
+    uint32_t gs;      /* 偏移  0：push gs 最后压入 */
+    uint32_t fs;      /* 偏移  4 */
+    uint32_t es;      /* 偏移  8 */
+    uint32_t ds;      /* 偏移 12 */
+    uint32_t edi;     /* 偏移 16：pusha 最后压入 → 最低地址 */
     uint32_t esi;     /* 偏移 20 */
     uint32_t ebp;     /* 偏移 24 */
-    uint32_t old_esp; /* 偏移 28：pusha 压入的原始 ESP（发出 int 0x80 前的 SP） */
+    uint32_t old_esp; /* 偏移 28：int 0x80 前的原始 SP */
     uint32_t ebx;     /* 偏移 32 */
     uint32_t edx;     /* 偏移 36 */
     uint32_t ecx;     /* 偏移 40 */
-    uint32_t eax;     /* 偏移 44：pusha 最先压入 → 在最高地址（系统调用号/返回值） */
+    uint32_t eax;     /* 偏移 44：pusha 最先压入 → 最高地址（调用号/返回值） */
 } regs_t;
 
-/**
- * syscall_dispatcher - 系统调用分发器
- * @regs: 寄存器上下文指针
- *
- * 根据 regs->eax 中的系统调用号分发到具体的处理函数，
- * 处理完成后将返回值写回 regs->eax，这样汇编代码 popa
- * 后返回值会出现在调用者的 eax 中。
- *
- * 此函数由 isr80_handler（汇编）调用。
- */
+/* 按 regs->eax 分发；返回值写回 regs->eax，由 isr80_handler 调用 */
 void syscall_dispatcher(regs_t *regs);
 
 /* ---- 具体系统调用函数（供分发器调用） ---- */
-int  sys_putchar(char c);           /* 输出字符 */
-int  sys_getchar(void);             /* 获取字符 */
-int  sys_write(const char *str);    /* 输出字符串 */
+int  sys_putchar(char c);
+int  sys_getchar(void);
+int  sys_write(const char *str);
 void sys_exit(int status);          /* 退出（不会返回） */
 
 #endif

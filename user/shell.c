@@ -1,28 +1,7 @@
-/**
- * =========================================================================
- * shell.c - HaoOS 用户态交互式 Shell
- *
- * 这是运行在 ring 3（用户态）的命令行解释器，通过 int 0x80 系统调用
- * 与内核通信。所有 I/O 操作都必须通过系统调用，不能直接访问硬件。
- *
- * 系统调用接口（详见 syscall.h）：
- *   SYS_PUTCHAR (1) - 输出一个字符
- *   SYS_GETCHAR (2) - 获取一个键盘输入（阻塞）
- *   SYS_WRITE   (3) - 输出字符串
- *   SYS_EXIT    (4) - 退出程序
- *   SYS_READ_SECT (5) - 读扇区（预留）
- *
- * 调用约定：eax=系统调用号, ebx/ecx=参数, int $0x80, 返回在 eax
- *
- * 功能：
- *   - 显示 "$ " 提示符
- *   - 支持退格（Backspace）删除
- *   - 支持方向键历史（待实现）
- *   - 内置命令：help, echo, clear, exit, tasks
- *
- * 注意：内核加载扁平二进制时跳到文件开头，所以入口函数必须放在最前面。
- * _entry 作为引导，直接跳转到 main。
- * =========================================================================
+/*
+ * shell.c - HaoOS 用户态 Shell（ring 3）
+ * 所有 I/O 走 int 0x80 系统调用（eax=调用号，ebx/ecx=参数）。
+ * 内核按扁平二进制加载、跳到文件开头执行，所以 _entry 必须放最前。
  */
 
 /* 裸机环境：没有 stddef.h，手动定义 NULL */
@@ -49,8 +28,8 @@
 #define SYS_UPTIME     23  /* 读开机时长 */
 #define SYS_MKDIR      24  /* 创建子目录 */
 #define SYS_LIST       25  /* 列目录 */
-#define SYS_YIELD      26
-#define SYS_USB_INFO   27  /* 让出 CPU（协作式调度测试） */
+#define SYS_YIELD      26  /* 让出 CPU（协作式调度测试） */
+#define SYS_USB_INFO   27  /* 打印 USB 设备信息 */
 
 /* FAT 目录项（与内核 fat_dirent_t 布局一致，32 字节） */
 struct dirent {
@@ -68,45 +47,45 @@ struct dirent {
     unsigned int file_size;
 };
 
-/* ==================== 引导入口 ==================== */
+/* ---- 引导入口 ---- */
 
-/** _entry - 引导入口，跳转到真正的 main 函数 */
+/* 引导入口：跳到 main */
 __attribute__((naked)) void _entry(void) {
     __asm__ volatile (
         "jmp main"
     );
 }
 
-/* ==================== 系统调用内联函数 ==================== */
+/* ---- 系统调用封装 ---- */
 
-/** putchar - 通过系统调用输出一个字符 */
+/* putchar - 通过系统调用输出一个字符 */
 static void putchar(char c) {
     __asm__ volatile ("int $0x80" : : "a"(1), "b"((unsigned int)c) : "memory");
 }
 
-/** getchar - 通过系统调用获取一个字符（阻塞） */
+/* getchar - 通过系统调用获取一个字符（阻塞） */
 static char getchar(void) {
     char c;
     __asm__ volatile ("int $0x80" : "=a"(c) : "a"(2) : "memory");
     return c;
 }
 
-/** write - 通过系统调用输出字符串 */
+/* write - 通过系统调用输出字符串 */
 static void write(const char* s) {
     __asm__ volatile ("int $0x80" : : "a"(3), "b"((unsigned int)s) : "memory");
 }
 
-/** exit - 通过系统调用退出程序 */
+/* exit - 通过系统调用退出程序 */
 static void exit(int status) {
     __asm__ volatile ("int $0x80" : : "a"(4), "b"(status) : "memory");
 }
 
-/** yield - 通过系统调用让出 CPU（协作式调度测试） */
+/* yield - 通过系统调用让出 CPU（协作式调度测试） */
 static void yield(void) {
     __asm__ volatile ("int $0x80" : : "a"(SYS_YIELD) : "memory");
 }
 
-/** getmouse - 通过系统调用获取鼠标状态 */
+/* getmouse - 通过系统调用获取鼠标状态 */
 static int getmouse(int *x, int *y, int *buttons) {
     /* 用一个 3 × int32 的缓冲区接收鼠标数据 */
     unsigned int buf[3];
@@ -120,121 +99,121 @@ static int getmouse(int *x, int *y, int *buttons) {
     return ret;
 }
 
-/* ==================== 设置类系统调用封装（settings TUI 用） ==================== */
+/* ---- 设置类系统调用封装（settings TUI 用） ---- */
 
-/** set_cursor - 定位 VGA 光标 */
+/* set_cursor - 定位 VGA 光标 */
 static void set_cursor(int row, int col) {
     __asm__ volatile ("int $0x80" : : "a"(SYS_SET_CURSOR), "b"((unsigned int)row), "c"((unsigned int)col) : "memory");
 }
 
-/** get_cursor - 读光标位置（(行<<16)|列） */
+/* get_cursor - 读光标位置（(行<<16)|列） */
 static int get_cursor(void) {
     int r;
     __asm__ volatile ("int $0x80" : "=a"(r) : "a"(SYS_GET_CURSOR) : "memory");
     return r;
 }
 
-/** clear_screen - 清屏 */
+/* clear_screen - 清屏 */
 static void clear_screen(void) {
     __asm__ volatile ("int $0x80" : : "a"(SYS_CLEAR) : "memory");
 }
 
-/** get_sens - 读鼠标灵敏度 */
+/* get_sens - 读鼠标灵敏度 */
 static int get_sens(void) {
     int r;
     __asm__ volatile ("int $0x80" : "=a"(r) : "a"(SYS_GET_SENS) : "memory");
     return r;
 }
 
-/** set_sens - 写鼠标灵敏度 */
+/* set_sens - 写鼠标灵敏度 */
 static void set_sens(int s) {
     __asm__ volatile ("int $0x80" : : "a"(SYS_SET_SENS), "b"((unsigned int)s) : "memory");
 }
 
-/** get_color - 读默认颜色 */
+/* get_color - 读默认颜色 */
 static int get_color(void) {
     int r;
     __asm__ volatile ("int $0x80" : "=a"(r) : "a"(SYS_GET_COLOR) : "memory");
     return r;
 }
 
-/** set_color - 写默认颜色 */
+/* set_color - 写默认颜色 */
 static void set_color(int c) {
     __asm__ volatile ("int $0x80" : : "a"(SYS_SET_COLOR), "b"((unsigned int)c) : "memory");
 }
 
-/** protect - 锁定保护区域：文本光标只能在当前行以下移动 */
+/* protect - 锁定保护区域：文本光标只能在当前行以下移动 */
 static void protect(void) {
     __asm__ volatile ("int $0x80" : : "a"(SYS_PROTECT) : "memory");
 }
 
-/** get_pglyph - 读鼠标指针图案 */
+/* get_pglyph - 读鼠标指针图案 */
 static int get_pglyph(void) {
     int r;
     __asm__ volatile ("int $0x80" : "=a"(r) : "a"(SYS_GET_PGLYPH) : "memory");
     return r;
 }
 
-/** set_pglyph - 写鼠标指针图案 */
+/* set_pglyph - 写鼠标指针图案 */
 static void set_pglyph(int g) {
     __asm__ volatile ("int $0x80" : : "a"(SYS_SET_PGLYPH), "b"((unsigned int)g) : "memory");
 }
 
-/** write_file - 写文件（新建或覆盖） */
+/* write_file - 写文件（新建或覆盖） */
 static int write_file(const char* name, const void* data, unsigned int size) {
     int r;
     __asm__ volatile ("int $0x80" : "=a"(r) : "a"(SYS_WRITE_FILE), "b"((unsigned int)name), "c"((unsigned int)data), "d"(size) : "memory");
     return r;
 }
 
-/** delete_file - 删除文件 */
+/* delete_file - 删除文件 */
 static int delete_file(const char* name) {
     int r;
     __asm__ volatile ("int $0x80" : "=a"(r) : "a"(SYS_DELETE_FILE), "b"((unsigned int)name) : "memory");
     return r;
 }
 
-/** read_file - 读文件 */
+/* read_file - 读文件 */
 static int read_file(const char* name, void* buf, unsigned int max) {
     int r;
     __asm__ volatile ("int $0x80" : "=a"(r) : "a"(SYS_READ_FILE), "b"((unsigned int)name), "c"((unsigned int)buf), "d"(max) : "memory");
     return r;
 }
 
-/** mkdir - 创建子目录 */
+/* mkdir - 创建子目录 */
 static int mkdir_sys(const char* path) {
     int r;
     __asm__ volatile ("int $0x80" : "=a"(r) : "a"(SYS_MKDIR), "b"((unsigned int)path) : "memory");
     return r;
 }
 
-/** list_dir - 列目录，返回条目数（-1 失败） */
+/* list_dir - 列目录，返回条目数（-1 失败） */
 static int list_dir(const char* path, struct dirent* buf, unsigned int max) {
     int r;
     __asm__ volatile ("int $0x80" : "=a"(r) : "a"(SYS_LIST), "b"((unsigned int)path), "c"((unsigned int)buf), "d"(max) : "memory");
     return r;
 }
 
-/** tasks_sys - 打印任务列表（内核输出） */
+/* tasks_sys - 打印任务列表（内核输出） */
 static void tasks_sys(void) {
     __asm__ volatile ("int $0x80" : : "a"(SYS_TASKS) : "memory");
 }
 
-/** get_time - 读时间（(时<<16)|(分<<8)|秒） */
+/* get_time - 读时间（(时<<16)|(分<<8)|秒） */
 static int get_time(void) {
     int r;
     __asm__ volatile ("int $0x80" : "=a"(r) : "a"(SYS_GET_TIME) : "memory");
     return r;
 }
 
-/** get_date - 读日期（((年-2000)<<16)|(月<<8)|日） */
+/* get_date - 读日期（((年-2000)<<16)|(月<<8)|日） */
 static int get_date(void) {
     int r;
     __asm__ volatile ("int $0x80" : "=a"(r) : "a"(SYS_GET_DATE) : "memory");
     return r;
 }
 
-/** get_uptime - 读开机时长（秒） */
+/* get_uptime - 读开机时长（秒） */
 static int get_uptime(void) {
     int r;
     __asm__ volatile ("int $0x80" : "=a"(r) : "a"(SYS_UPTIME) : "memory");
@@ -244,40 +223,30 @@ static int get_uptime(void) {
 /* 前置声明：print_num 定义在后面的 settings TUI 部分 */
 static void print_num(int v);
 
-/* ==================== 工具函数 ==================== */
+/* ---- 工具函数 ---- */
 
-/** strlen - 计算字符串长度 */
+/* strlen - 计算字符串长度 */
 static unsigned int strlen(const char* s) {
     unsigned int len = 0;
     while (s[len]) len++;
     return len;
 }
 
-/** strcmp - 比较两个字符串 */
+/* strcmp - 比较两个字符串 */
 static int strcmp(const char* a, const char* b) {
     while (*a && *b && *a == *b) { a++; b++; }
     return *a - *b;
 }
 
-/** strncmp - 比较两个字符串的前 n 个字符 */
+/* strncmp - 比较两个字符串的前 n 个字符 */
 static int strncmp(const char* a, const char* b, unsigned int n) {
     while (n-- && *a && *b && *a == *b) { a++; b++; }
     if (n == (unsigned int)-1) return 0;
     return *a - *b;
 }
 
-/**
- * readline - 读取一行输入（支持命令历史）
- * @buf:  缓冲区
- * @size: 缓冲区大小
- * 返回值：读取的字符数（不含 '\0'）
- *
- * 支持：
- *   - 普通字符：回显并存入缓冲区
- *   - Backspace（\b）：擦除上一个字符
- *   - Enter（\n）：结束输入，保存到历史
- *   - Up/Down（特殊码 0x01/0x02）：翻页命令历史（内核拦截方向键后返回）
- */
+/* 读一行：普通字符回显入缓冲，\b 退格，Enter 存历史，
+ * 0x01/0x02（内核把方向键转成这两个码）翻历史 */
 
 /* 命令历史（环形，最多 HIST_MAX 条） */
 #define HIST_MAX 8
@@ -285,10 +254,7 @@ static char history[HIST_MAX][128];
 static int hist_count = 0;    /* 历史条数 */
 static int hist_pos = 0;      /* 0=正在编辑，>0=浏览中的历史位置 */
 
-/**
- * hist_apply - 用历史第 i 条（0=最新）填充当前编辑行并重绘
- * 返回新行长度
- */
+/* 用历史第 i 条填充编辑行并重绘，返回新行长度 */
 static unsigned int hist_apply(char* buf, unsigned int size, int i,
                                int start_row, int start_col, unsigned int disp_len) {
     /* 清掉当前显示内容 */
@@ -303,18 +269,14 @@ static unsigned int hist_apply(char* buf, unsigned int size, int i,
     return k;
 }
 
-/**
- * hist_clear_line - 清掉当前编辑行的显示内容
- */
+/* 清掉当前编辑行显示 */
 static void hist_clear_line(int start_row, int start_col, unsigned int disp_len) {
     set_cursor(start_row, start_col);
     for (unsigned int k = 0; k < disp_len; k++) putchar(' ');
     set_cursor(start_row, start_col);
 }
 
-/**
- * hist_add - 把一条命令存入历史（去重，环形）
- */
+/* 存一条命令进历史（去重；满则整体前移丢最旧） */
 static void hist_add(const char* line) {
     unsigned int len = 0;
     while (line[len]) len++;
@@ -404,9 +366,9 @@ static unsigned int readline(char* buf, unsigned int size) {
     }
 }
 
-/* ==================== 命令实现 ==================== */
+/* ---- 命令实现 ---- */
 
-/** cmd_help - 显示帮助信息 */
+/* cmd_help - 显示帮助信息 */
 static void cmd_help(const char* args) { (void)args;
     write("\nHaoOS Shell v0.1 - Available commands:\n");
     write("  help      - Show this help message\n");
@@ -426,30 +388,30 @@ static void cmd_help(const char* args) { (void)args;
     write("\n");
 }
 
-/** cmd_echo - 回显参数 */
+/* cmd_echo - 回显参数 */
 static void cmd_echo(const char* args) {
     write(args);
     putchar('\n');
 }
 
-/** cmd_clear - 清屏（直接写 VGA 需要用户态页映射，暂用换行模拟） */
+/* cmd_clear - 清屏（直接写 VGA 需要用户态页映射，暂用换行模拟） */
 static void cmd_clear(const char* args) { (void)args;
     /* 通过输出大量换行来"清屏" */
     for (int i = 0; i < 30; i++) putchar('\n');
 }
 
-/** cmd_tasks - 显示任务列表（内核打印） */
+/* cmd_tasks - 显示任务列表（内核打印） */
 static void cmd_tasks(const char* args) { (void)args;
     tasks_sys();
 }
 
-/** cmd_exit - 关闭系统（暂停 CPU） */
+/* cmd_exit - 关闭系统（暂停 CPU） */
 static void cmd_exit(const char* args) { (void)args;
     write("Halting system.\n");
     exit(0);
 }
 
-/** cmd_time - 显示当前日期时间（RTC） */
+/* cmd_time - 显示当前日期时间（RTC） */
 static void cmd_time(const char* args) { (void)args;
     unsigned int t = (unsigned int)get_time();
     unsigned int d = (unsigned int)get_date();
@@ -467,11 +429,9 @@ static void cmd_time(const char* args) { (void)args;
     putchar('\n');
 }
 
-/** cmd_busy - 用户态忙循环（验证抢占式调度）
- *
- * 纯用户态计算，不调用任何系统调用（避免进入内核态 IF=0 而
- * 屏蔽 IRQ0）。运行期间每 30ms 应被 PIT 抢占切到 demo 任务，
- * 屏幕会出现 demo tick——这就是抢占式的可视证据。 */
+/* cmd_busy - 用户态忙循环（验证抢占式调度）
+ * 不调系统调用（避免内核态 IF=0 屏蔽 IRQ0）；运行中应被 PIT
+ * 抢占切到 demo 任务，屏幕出现 demo tick 即抢占生效的证据。 */
 static void cmd_busy(const char* args) { (void)args;
     volatile unsigned int x = 0;
     write("busy: computing in user mode...\n");
@@ -480,7 +440,7 @@ static void cmd_busy(const char* args) { (void)args;
     write("busy done.\n");
 }
 
-/** cmd_uptime - 显示开机时长（秒 → 天/时/分/秒） */
+/* cmd_uptime - 显示开机时长（秒 → 天/时/分/秒） */
 static void cmd_uptime(const char* args) { (void)args;
     unsigned int s = (unsigned int)get_uptime();
     unsigned int days = s / 86400;
@@ -521,7 +481,7 @@ static void cmd_save(const char* args) {
     }
 }
 
-/** cmd_mkdir - 创建子目录 */
+/* cmd_mkdir - 创建子目录 */
 static void cmd_mkdir(const char* args) {
     char path[64];
     unsigned int i = 0;
@@ -540,7 +500,7 @@ static void cmd_mkdir(const char* args) {
     }
 }
 
-/** cmd_ls - 列出目录内容 */
+/* cmd_ls - 列出目录内容 */
 static void cmd_ls(const char* args) {
     char path[64];
     unsigned int i = 0;
@@ -584,7 +544,7 @@ static void cmd_ls(const char* args) {
     }
 }
 
-/** cmd_rm - 删除文件 */
+/* cmd_rm - 删除文件 */
 static void cmd_rm(const char* args) {
     char fname[32];
     unsigned int i = 0;
@@ -604,7 +564,7 @@ static void cmd_rm(const char* args) {
     }
 }
 
-/** cmd_cat - 显示文件内容 */
+/* cmd_cat - 显示文件内容 */
 static void cmd_cat(const char* args) {
     char fname[32];
     unsigned int i = 0;
@@ -625,7 +585,7 @@ static void cmd_cat(const char* args) {
     putchar('\n');
 }
 
-/** cmd_mouse - 显示鼠标位置 */
+/* cmd_mouse - 显示鼠标位置 */
 static void cmd_mouse(const char* args) { (void)args;
     int x, y, btn;
     if (getmouse(&x, &y, &btn) == 0) {
@@ -667,19 +627,19 @@ static void cmd_mouse(const char* args) { (void)args;
     }
 }
 
-/* ==================== 设置 TUI ==================== */
+/* ---- 设置 TUI ---- */
 
-/** 主题颜色表：名字 + 属性字节（低4位前景色，高4位背景色） */
+/* 主题颜色表：名字 + 属性字节（低4位前景色，高4位背景色） */
 static const char* color_names[] = { "White", "Cyan", "Green", "Red", "Yellow", "Blue", "Pink" };
 static const int   color_values[] = { 0x0F, 0x0B, 0x0A, 0x0C, 0x0E, 0x09, 0x0D };
 #define COLOR_COUNT 7
 
-/** 指针图案表：名字 + CP437 字形码 */
+/* 指针图案表：名字 + CP437 字形码 */
 static const char* glyph_names[] = { "Block", "Dark", "Mid", "Light", "Right", "Left", "Up", "Down" };
 static const int   glyph_values[] = { 0xDB, 0xB2, 0xB1, 0xB0, 0x10, 0x11, 0x1E, 0x1F };
 #define GLYPH_COUNT 8
 
-/** print_num - 十进制整数输出 */
+/* print_num - 十进制整数输出 */
 static void print_num(int v) {
     char buf[8];
     int idx = 0;
@@ -689,12 +649,12 @@ static void print_num(int v) {
     while (idx > 0) putchar(buf[--idx]);
 }
 
-/** tui_pad - 输出 n 个空格，清除值变短时残留的旧字符 */
+/* tui_pad - 输出 n 个空格，清除值变短时残留的旧字符 */
 static void tui_pad(int n) {
     for (int i = 0; i < n; i++) putchar(' ');
 }
 
-/** tui_frame - 绘制全屏边框（上下双线 + 左右边线 + 标题） */
+/* tui_frame - 绘制全屏边框（上下双线 + 左右边线 + 标题） */
 static void tui_frame(void) {
     /* 顶边框：┌──── HaoOS Settings ────┐ */
     set_cursor(0, 0);
@@ -719,7 +679,7 @@ static void tui_frame(void) {
     putchar(0xD9);                      /* ┘ */
 }
 
-/** tui_draw - 绘制设置界面（全屏边框，用 ASCII 标签保证 CP437 对齐） */
+/* tui_draw - 绘制设置界面（全屏边框，用 ASCII 标签保证 CP437 对齐） */
 static void tui_draw(int sel, int sens, int color_idx, int glyph_idx) {
     int filled = sens > 10 ? 10 : sens;
 
@@ -762,7 +722,7 @@ static void tui_draw(int sel, int sens, int color_idx, int glyph_idx) {
     write("W/S select    A/D adjust    Q/Esc exit");
 }
 
-/**
+/*
  * settings_tui - 全屏设置界面
  *
  * 支持：
@@ -814,17 +774,17 @@ static void settings_tui(void) {
     set_cursor(24, 0);
 }
 
-/** cmd_usb - 显示 USB 设备列表与 MSC 状态 */
+/* cmd_usb - 显示 USB 设备列表与 MSC 状态 */
 static void cmd_usb(const char* args) { (void)args;
     __asm__ volatile ("int $0x80" : : "a"(SYS_USB_INFO) : "memory");
 }
 
-/** cmd_settings - settings 命令入口 */
+/* cmd_settings - settings 命令入口 */
 static void cmd_settings(const char* args) { (void)args;
     settings_tui();
 }
 
-/* ==================== 命令表 ==================== */
+/* ---- 命令表 ---- */
 typedef struct {
     const char* name;       /* 命令名 */
     void (*handler)(const char* args);  /* 处理函数 */
@@ -853,13 +813,7 @@ static command_t commands[] = {
     { NULL,    NULL }
 };
 
-/**
- * execute - 解析并执行命令
- * @line: 输入的命令行
- *
- * 按空格分割命令名和参数，在命令表中查找匹配并执行。
- * 如果未找到，提示未知命令。
- */
+/* 按空格拆命令名和参数，查命令表执行；未找到报 Unknown command */
 static void execute(const char* line) {
     /* 跳过前导空格 */
     while (*line == ' ') line++;
@@ -892,16 +846,9 @@ static void execute(const char* line) {
     write("\nType 'help' for available commands.\n");
 }
 
-/* ==================== Shell 主循环 ==================== */
+/* ---- Shell 主循环 ---- */
 
-/**
- * main - Shell 入口
- *
- * 无限循环：
- *   1. 输出提示符 "$ "
- *   2. 读取一行输入
- *   3. 解析并执行命令
- */
+/* Shell 主循环：提示符 → 读一行 → 执行，循环 */
 void main(void) {
     char line[128];
 

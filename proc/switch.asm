@@ -1,25 +1,10 @@
-; =============================================================================
-; switch.asm - 任务上下文切换（汇编实现）
+; switch.asm - 任务切换
+;   switch_to(prev, next)      内核任务切换：pusha/popa 存恢复上下文
+;   switch_to_user(prev, next) 切到用户任务：手动 pop + iret
+;   iret_to_user(eip, esp)     直接 iret 进 ring3
 ;
-; 本文件实现两个核心函数：
-;
-; 1. switch_to(task_t* prev, task_t* next) —— 内核任务切换
-;    使用 pusha/popa 保存和恢复所有通用寄存器，保存当前栈指针到
-;    prev->esp，然后加载 next->esp 并从新栈恢复寄存器。最后 ret
-;    会弹出下一个任务的 EIP，从而实现无缝切换到不同执行流。
-;
-; 2. switch_to_user(task_t* next) —— 切换到用户态任务
-;    设置用户态的数据段（DS/ES/FS/GS = 0x23），然后通过 retf
-;    （远返回）跳到用户代码段（CS=0x1B）的入口地址。
-;
-; task_t 结构体布局（与 proc/task.h 中定义一致）：
-;   偏移 0: esp（栈指针，这是切换的核心——切换栈即切换执行流）
-;   偏移 4: eip（指令指针，新任务的入口或断点）
-;
-; x86 pusha/popa 对应的寄存器顺序：
-;   pusha: EAX, ECX, EDX, EBX, ESP, EBP, ESI, EDI
-;   popa:  EDI, ESI, EBP, ESP, EBX, EDX, ECX, EAX
-; =============================================================================
+; task_t 偏移 0 = esp（切换栈即切换执行流），偏移 4 = eip
+; pusha 顺序：EAX,ECX,EDX,EBX,ESP,EBP,ESI,EDI；popa 反之
 
 global switch_to
 global switch_to_user
@@ -27,89 +12,55 @@ global iret_to_user
 
 section .text
 
-; =============================================================================
 ; void switch_to(task_t* prev, task_t* next)
-;
-; C 调用约定参数：
-;   [ebp+8]  = prev (当前任务指针)
-;   [ebp+12] = next (目标任务指针)
-;
-; 步骤：
-;   1. pusha 保存当前任务的所有通用寄存器到它的栈上
-;   2. 将当前栈指针 ESP 保存到 prev->esp
-;   3. 从 next->esp 加载新栈指针
-;   4. popa 恢复新任务的寄存器状态
-;   5. ret 弹出新任务的 EIP（即新任务此前执行到的位置）
-; =============================================================================
+; [ebp+8]=prev, [ebp+12]=next
+; pusha 存上下文 → prev->esp = esp → 载 next->esp → popa → ret
 switch_to:
-    ; 保存调用者的 EBP（标准函数序言）
     push ebp
     mov ebp, esp
 
-    ; pusha 将所有通用寄存器压入当前任务的栈。
-    ; 这是当前任务的"上下文快照"——当未来再次切换回来时，
-    ; popa 会恢复这些值，仿佛从未离开过。
+    ; 上下文快照：切回时 popa 恢复，仿佛从未离开
     pusha
 
-    ; eax = prev（当前任务）
-    mov eax, [ebp + 8]
-    ; edx = next（目标任务）
-    mov edx, [ebp + 12]
+    mov eax, [ebp + 8]      ; prev
+    mov edx, [ebp + 12]     ; next
 
-    ; [eax] 即 prev->esp = 当前栈指针
-    ; 注意：现在栈顶有 pusha 压入的 8 个寄存器 + EBP，
-    ; 所以保存的是 pusha 之后的 ESP 值。
-    ; prev 为 NULL 时（终止路径，prev 已释放）跳过保存。
+    ; 保存的是 pusha 之后（含 8 寄存器 + EBP）的 ESP；
+    ; prev 为 NULL（终止路径）时跳过
     test eax, eax
     jz .skip_save
     mov [eax], esp
 .skip_save:
 
-    ; ESP = next->esp：加载新任务的栈指针。
-    ; 此时栈指针指向新任务上次 pusha 之后的位置
+    ; 换栈：指向新任务上次 pusha 之后的位置
     mov esp, [edx]
 
-    ; ⚠️ 内核态抢占加固：恢复内核数据段选择子。
-    ; 此前 switch_to 不设段寄存器——从被抢占的用户任务（ds=0x23）
-    ; 切到内核任务时，内核任务会带着 0x23 运行（平坦模型下侥幸正确，
-    ; 但不规范；启用非平坦段/严格保护后必炸）。
+    ; ⚠️ 恢复内核数据段：从被抢占的用户任务（ds=0x23）切到内核任务时
+    ; 不清段寄存器会让内核带着 0x23 跑（平坦模型下侥幸能跑，非平坦
+    ; 段/严格保护下必炸）
     mov ax, 0x10
     mov ds, ax
     mov es, ax
 
-    ; popa 恢复新任务的寄存器状态（顺序：EDI, ESI, EBP, ESP, EBX, EDX, ECX, EAX）
-    ; 注意 popa 恢复的 ESP 值会被丢弃（栈指针不变），
-    ; 其他 7 个寄存器从新栈恢复
+    ; popa 恢复寄存器（ESP 槽被丢弃，栈指针不变）
     popa
 
-    ; 恢复 EBP
     pop ebp
 
-    ; ret：弹出新任务栈顶的 EIP，跳转到新任务继续执行。
-    ; 对第一次被调度的新任务，EIP 指向 entry 函数
+    ; 弹出 EIP：首次调度是 entry，之后是上次暂停点
     ret
 
-; =============================================================================
 ; void switch_to_user(task_t* prev, task_t* next)
-;
-; 切换到用户态任务。完整版实现（旧版只设置段寄存器就 retf，是残废实现）：
-;
-;   1. pusha 保存 prev（内核任务）的上下文——像 switch_to 一样
-;   2. prev->esp = 当前栈指针（prev 为 NULL 时跳过）
-;   3. 加载 next->esp —— 指向 next 内核栈上的 iret 帧
-;      （该帧由 task_create_user 布置，或由 isr80_handler/IRQ 入口保存）
-;   4. 设置用户数据段（DS/ES/FS/GS = 0x23）
-;   5. iret —— 弹出 EIP/CS/EFLAGS/ESP/SS，进入 ring 3
-;
-; 注意：用户任务（prev 是用户任务时）的 esp 由中断入口保存，
-; 不能在这里用 pusha 的栈覆盖——调用方应传 NULL。
-; =============================================================================
+; 内核任务 → 用户任务（旧版只设段寄存器就 retf，是残废实现）：
+;   pusha 存 prev → prev->esp = esp（prev 可为 NULL）→ 载 next->esp
+;   （内核栈上 [pusha 帧][iret 帧]）→ 设用户段 → 手动 pop 寄存器 → iret
+; prev 是用户任务时调用方必须传 NULL：其上下文由中断入口保存，
+; 这里 pusha 会覆盖 iret 帧指针
 switch_to_user:
     push ebp
     mov ebp, esp
 
-    ; 保存 prev 的通用寄存器（如果 prev 是内核任务）
-    pusha
+    pusha          ; 保存 prev 上下文（prev 为内核任务时）
 
     mov eax, [ebp + 8]      ; prev
     mov edx, [ebp + 12]     ; next
@@ -119,22 +70,20 @@ switch_to_user:
     mov [eax], esp          ; prev->esp = 当前栈指针
 .skip_save:
 
-    ; 加载 next 的栈指针——指向其内核栈上的上下文帧：
-    ;   [pusha 帧 32B][iret 帧 20B]（task->esp 指向 pusha 帧顶部）
-    ; ⚠️ 修复：必须手动 pop 恢复通用寄存器再 iret！裸 iret 只恢复
-    ; EIP/CS/EFLAGS/ESP/SS——抢占发生在用户态代码中途时（如 putchar
-    ; 的 mov %al,-0x1(%ebp)），EAX/EBP 等全是内核残留值 → 用户态
-    ; 写垃圾地址 → #GP（实测抓到）。
+    ; 换栈：next 内核栈上的 [pusha 帧][iret 帧]，esp 指向 pusha 帧顶
+    ; ⚠️ 修复：必须手动 pop 寄存器再 iret——裸 iret 只恢复 EIP/CS/EFLAGS/
+    ; ESP/SS。抢占发生在用户态代码中途时（如 putchar 的 mov %al,-0x1(%ebp)），
+    ; EAX/EBP 全是内核残留值 → 用户态写垃圾地址 → #GP（实测抓到）
     mov esp, [edx]
 
-    ; 设置用户数据段选择子（ring 3）
+    ; 切到用户数据段（ring3）
     mov ax, 0x23
     mov ds, ax
     mov es, ax
     mov fs, ax
     mov gs, ax
 
-    ; 恢复用户寄存器（popa 顺序：EDI, ESI, EBP, 跳过ESP, EBX, EDX, ECX, EAX）
+    ; 手动 pop 用户寄存器（顺序同 popa，ESP 槽跳过）
     pop edi
     pop esi
     pop ebp
@@ -143,28 +92,21 @@ switch_to_user:
     pop edx
     pop ecx
     pop eax
-    ; 现在 ESP = iret 帧起点 → 弹出 EIP/CS/EFLAGS/ESP/SS，进入 ring 3
+    ; 此时 ESP 在 iret 帧起点：弹出 EIP/CS/EFLAGS/ESP/SS 进 ring3
     iret
 
-; =============================================================================
 ; void iret_to_user(uint32_t eip, uint32_t esp)
-;
-; 通过 iret 从 ring 0 切换到 ring 3 执行用户代码。
-; 在栈上构造 iret 帧并执行 iret。
-; =============================================================================
-
+; 在栈上现搭 iret 帧进 ring3（不经调度器）
 iret_to_user:
-    ; C 调用约定参数：[esp+4]=eip, [esp+8]=esp
-    mov eax, [esp + 4]
-    mov edx, [esp + 8]
+    mov eax, [esp + 4]      ; eip
+    mov edx, [esp + 8]      ; esp
 
-    ; 关中断，防止 CPU 响应 PIT/键盘中断干扰
-    cli
+    cli                     ; 避免 iret 前被中断打断
 
-    ; 构造 iret 帧
-    push dword 0x23      ; SS
-    push edx             ; ESP（调用者传入的用户栈顶）
+    ; iret 帧（弹出顺序 EIP,CS,EFLAGS,ESP,SS → 反着压）
+    push dword 0x23      ; SS  = 用户数据段 (ring3)
+    push edx             ; ESP
     push dword 0x200     ; EFLAGS (IF=1)
-    push dword 0x1B      ; CS
-    push eax             ; EIP（调用者传入的代码入口）
+    push dword 0x1B      ; CS  = 用户代码段 (ring3)
+    push eax             ; EIP
     iret

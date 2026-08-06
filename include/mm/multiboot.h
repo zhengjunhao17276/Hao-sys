@@ -1,22 +1,6 @@
-/**
- * =========================================================================
- * multiboot.h - Multiboot 信息结构定义
- *
- * Multiboot 是一个开放的操作系统引导规范，由 GRUB 等引导加载程序实现。
- * 当 GRUB 加载 HaoOS 时，会通过 ebx 寄存器传递一个 multiboot_info_t
- * 结构体的物理地址，内核通过解析这个结构体了解硬件配置。
- *
- * 信息包含：
- *   - 内存布局（低位内存 640KB、高位内存从 1MB 开始）
- *   - 内存映射（MMAP），详细描述哪些物理地址范围可用/保留
- *   - 命令行参数、模块信息
- *   - 引导加载器名称
- *   - VBE 显示模式信息（可选）
- *
- * 标志位（flags 字段的位掩码）：
- *   内核首先检查 info->flags 的哪些位被置位，确定哪些字段有效。
- *   例如 bit 6（0x40）表示 mmap_addr/mmap_length 有效。
- * =========================================================================
+/*
+ * multiboot.h - Multiboot 信息结构（GRUB 经 ebx 传入，物理地址）
+ * 内核先查 info->flags 各位确定哪些字段有效。
  */
 
 #ifndef MULTIBOOT_H
@@ -24,7 +8,7 @@
 
 #include <stdint.h>
 
-/* ---- Multiboot 信息标志位 ---- */
+/* ---- 信息标志位 ---- */
 #define MULTIBOOT_MEMORY_INFO     0x01    /* bit0: mem_lower/mem_upper 有效 */
 #define MULTIBOOT_BOOT_DEVICE     0x02    /* bit1: boot_device 有效 */
 #define MULTIBOOT_CMDLINE         0x04    /* bit2: cmdline 有效 */
@@ -39,17 +23,15 @@
 #define MULTIBOOT_VIDEO_INFO      0x800   /* bit11: VBE 视频信息有效 */
 
 /* 内存映射条目的 type 值 */
-#define MULTIBOOT_MMAP_AVAILABLE   1    /* 可用内存，操作系统可以使用 */
-#define MULTIBOOT_MMAP_RESERVED    2    /* 保留内存，不可使用 */
+#define MULTIBOOT_MMAP_AVAILABLE   1    /* 可用内存 */
+#define MULTIBOOT_MMAP_RESERVED    2    /* 保留 */
 #define MULTIBOOT_MMAP_ACPI        3    /* ACPI 可恢复内存 */
 #define MULTIBOOT_MMAP_NVS         4    /* ACPI NVS 内存（需要保存） */
 #define MULTIBOOT_MMAP_BADRAM      5    /* 坏内存区域，应避免使用 */
 
 /* ---- Multiboot 信息结构 ---- */
 
-/**
- * multiboot_elf_sect_t - ELF 符号表信息
- */
+/* ELF 符号表信息 */
 typedef struct {
     uint32_t num;      /* 节区头表条目数 */
     uint32_t size;     /* 每个节区头的大小 */
@@ -57,9 +39,7 @@ typedef struct {
     uint32_t shndx;    /* 字符串表的节区索引 */
 } __attribute__((packed)) multiboot_elf_sect_t;
 
-/**
- * multiboot_aout_sym_t - a.out 符号表信息
- */
+/* a.out 符号表信息 */
 typedef struct {
     uint32_t tabsize;   /* 符号表大小 */
     uint32_t strsize;   /* 字符串表大小 */
@@ -67,11 +47,7 @@ typedef struct {
     uint32_t reserved;
 } __attribute__((packed)) multiboot_aout_sym_t;
 
-/**
- * multiboot_module_t - 引导模块信息
- * 引导器可以在内存中加载辅助模块（如 ramdisk/初始文件系统），
- * mod_start/mod_end 标识其在物理内存中的位置。
- */
+/* 引导模块（ramdisk 等），mod_start/mod_end 为物理地址 */
 typedef struct {
     uint32_t mod_start;     /* 模块起始物理地址 */
     uint32_t mod_end;       /* 模块结束物理地址 */
@@ -79,13 +55,7 @@ typedef struct {
     uint32_t reserved;
 } __attribute__((packed)) multiboot_module_t;
 
-/**
- * multiboot_mmap_entry_t - 内存映射条目
- *
- * 每个条目描述一段连续的物理地址空间及其类型。
- * size 字段（4 字节）表示此条目的字节数（不包括 size 自身），
- * 遍历时应跳过 size + 4 字节。每个条目至少 20 字节。
- */
+/* MMAP 条目：遍历时跳过 size+4 字节，每条目至少 20 字节 */
 typedef struct {
     uint32_t size;              /* 条目大小（不包含自身） */
     uint64_t base_addr_low;     /* 基地址低 32 位 */
@@ -95,13 +65,7 @@ typedef struct {
     uint32_t type;              /* 1=可用, 2=保留, 3=ACPI, 4=NVS, 5=坏内存 */
 } __attribute__((packed)) multiboot_mmap_entry_t;
 
-/**
- * multiboot_info_t - 主信息结构体（由 GRUB 填充）
- *
- * GRUB 在跳转到内核之前会将此结构体放在内存中，并将地址存入 ebx。
- * 内核通过检查 flags 字段判断哪些字段有效。
- * 注意：所有地址字段都是物理地址，在启用分页前需要直接使用。
- */
+/* 主信息结构（GRUB 填充）。地址字段都是物理地址，分页前直接使用 */
 typedef struct {
     /* 基本信息（通常都可用） */
     uint32_t flags;             /* 位掩码，标明哪些字段有效 */
