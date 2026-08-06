@@ -7,7 +7,7 @@
 - **启动链**：Multiboot → 保护模式 → VGA 终端 → 物理内存管理 → 分页
 - **内存管理**：位图式物理内存分配器（PMM）+ 4KB 分页虚拟内存（VMM，身份映射）
 - **中断**：IDT 256 门 + 8259A PIC 重映射，异常/IRQ/系统调用（int 0x80）全链路
-- **多任务**：协作式轮转调度，内核任务 + 用户态任务（ring 3）混合调度，TSS 内核栈切换
+- **多任务**：**抢占式**时间片轮转（PIT 100Hz 时钟源，30ms 时间片），内核/用户态任务混合调度，TSS 内核栈切换，完整寄存器上下文恢复
 - **设备驱动**：PS/2 键盘/鼠标、ATA PIO、PCI 扫描、UHCI USB（HID 键盘 + Mass Storage BOT）
 - **文件系统**：FAT12/16 读写（创建/删除文件、目录、长文件名 8.3 格式）
 - **用户态**：Shell（命令历史、TUI 设置界面）+ 27 个系统调用
@@ -96,11 +96,13 @@ settings  TUI 设置界面（鼠标可用）   exit    退出 Shell
 `SYS_GETMOUSE(6)` `SYS_WRITE_FILE(17)` `SYS_READ_FILE(18)` `SYS_TASKS(19)`
 `SYS_GET_TIME(20)` `SYS_GET_DATE(21)` `SYS_UPTIME(23)` `SYS_MKDIR(24)` `SYS_LIST(25)` `SYS_YIELD(26)`
 
+> 提示：输入 `busy` 可观察抢占式调度——纯用户态忙循环期间会被 PIT 抢占切到 demo 任务。
+
 调用约定：`eax=调用号, ebx/ecx/edx=参数, int $0x80, 返回值在 eax`。
 
 ## 🐛 已知限制
 
-- 协作式调度（无抢占）——PIT 定时器 + 时间片轮转是下一步计划
+- 只在用户态抢占（内核态关中断，避免共享状态重入）；内核态抢占需要可重入改造
 - USB 驱动仅验证了代码路径（QEMU 无 UHCI 控制器），真机待测
   （DATA toggle 跟踪、TD 终止位、错误处理等 4 个待验证点）
 - 用户进程共享内核低 4MB 页表，进程空间隔离未实现
