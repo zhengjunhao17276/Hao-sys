@@ -80,11 +80,10 @@ int sys_write(const char *str) {
     }
     if (!terminated) return -1;
 
-    for (uint32_t i = 0; i < 4096; i++) {
-        char c = str[i];
-        if (c == '\0') break;
-        vga_putchar(c);
-    }
+    /* ⚠️ 性能优化：整串一把锁输出（vga_write 内部持锁循环，
+     * 不再逐字符 vga_putchar 重复加锁）。NUL 已由上方扫描确认，
+     * 输出不会越界。 */
+    vga_write(str);
     return 0;
 }
 
