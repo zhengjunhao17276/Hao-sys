@@ -942,6 +942,9 @@ static int uhci_submit_urb(usb_hc_t *hc, usb_urb_t *urb) {
     return -1;
 }
 
+/* 前向声明：enumerate_device 末尾对 hub 设备（class 0x09）递归扫描下游 */
+static void usb_hub_scan(usb_hc_t *hc, uint8_t hub_addr);
+
 /* ================================================================
  *  第12章: USB 设备枚举
  *
@@ -1139,6 +1142,74 @@ static void enumerate_device(usb_hc_t *hc, uint8_t port) {
     vga_write(" PID=");
     vga_write_hex(dev_desc.idProduct);
     vga_write("\n");
+
+    /* ⚠️ 新增：HUB 设备（class 0x09）→ 递归扫描下游端口。
+     * 真机键鼠/U 盘常经 hub 连接；QEMU 在 UHCI(1.1) 下用虚拟 hub
+     * 桥接 USB2 设备（usb-storage 挂在 hub 下游，无此支持枚举不到）。 */
+    if (dev_desc.bDeviceClass == 0x09) {
+        vga_write("[USB] Hub detected, scanning downstream ports...\n");
+        usb_hub_scan(hc, new_addr);
+    }
+}
+
+/* ============================================================
+ *  USB HUB 支持（class 0x09）
+ * ============================================================ */
+
+/**
+ * usb_hub_port_count - 读取 hub 的端口数（HUB 描述符第 2 字节 bNbrPorts）
+ */
+static uint8_t usb_hub_port_count(usb_hc_t *hc, uint8_t hub_addr) {
+    uint8_t buf[8];
+    int ret = usb_control_transfer(hc, hub_addr,
+                                   0x80, USB_REQ_GET_DESCRIPTOR,
+                                   (0x29 << 8) | 0,   /* HUB 描述符 */
+                                   0, buf, sizeof(buf));
+    if (ret < 0) return 0;
+    return buf[2];   /* bNbrPorts */
+}
+
+/**
+ * usb_hub_scan - 扫描 hub 的下游端口，枚举每个已连接设备（递归支持级联）
+ *
+ * 流程（每个端口）：
+ *   GET_PORT_STATUS → CCS 位判断有无设备
+ *   → SET_FEATURE(PORT_POWER) 供电 → SET_FEATURE(PORT_RESET) 复位
+ *   → 等待复位完成 → enumerate_device（下游设备从地址 0 开始，
+ *     hub 会把地址 0 的控制请求转发到刚复位的端口）
+ *   → 若下游设备是 hub（class 0x09），enumerate_device 内部递归
+ */
+static void usb_hub_scan(usb_hc_t *hc, uint8_t hub_addr) {
+    uint8_t nports = usb_hub_port_count(hc, hub_addr);
+    if (nports == 0 || nports > 16) nports = 4;   /* 描述符失败时兜底 */
+    vga_write("[USB] Hub with ");
+    vga_write_hex(nports);
+    vga_write(" ports, scanning downstream...\n");
+
+    for (uint8_t port = 1; port <= nports; port++) {
+        uint8_t st[4] = {0, 0, 0, 0};
+        /* GET_PORT_STATUS：class 请求，wIndex = 端口号（从 1 开始） */
+        int ret = usb_control_transfer(hc, hub_addr, 0xA3, 0x00 /* GET_STATUS */,
+                                       0, port, st, sizeof(st));
+        if (ret < 0) continue;
+        uint16_t status = (uint16_t)(st[0] | (st[1] << 8));
+        if (!(status & 0x0001)) continue;   /* CCS：无设备连接 */
+
+        vga_write("[USB] Hub port ");
+        vga_write_hex(port);
+        vga_write(" has device, resetting...\n");
+
+        /* PORT_POWER (8)：保证端口供电（真机需要；QEMU 默认已供电） */
+        usb_control_transfer(hc, hub_addr, 0x23, 0x03 /* SET_FEATURE */,
+                             8, port, NULL, 0);
+        /* PORT_RESET (4)：复位下游设备 */
+        usb_control_transfer(hc, hub_addr, 0x23, 0x03 /* SET_FEATURE */,
+                             4, port, NULL, 0);
+        uhci_delay_ms(50);   /* 复位稳定时间 */
+
+        /* 枚举下游设备（从地址 0 开始；hub 转发地址 0 请求到该端口） */
+        enumerate_device(hc, port);
+    }
 }
 
 /* ================================================================

@@ -289,7 +289,11 @@ void usb_mass_storage_init(void) {
 
         if (dev->dev_desc.bDeviceClass == 0x08) {
             is_msc = true;
-        } else if (dev->dev_desc.bDeviceClass == 0x00) {
+        } else {
+            /* ⚠️ 修复：设备级 class 不可靠——QEMU 的 usb-storage 报 0x09，
+             * 真机 U 盘也常有设备级 class 不规范的情况。
+             * 正确做法：读配置描述符，按接口级 class（bInterfaceClass）
+             * 判断是否 Mass Storage。旧实现只认 0x08/0x00，漏掉这类设备。 */
             uint8_t buffer[256];
             int ret = usb_control_transfer(dev->hc, dev->address,
                                            0x80, USB_REQ_GET_DESCRIPTOR,
