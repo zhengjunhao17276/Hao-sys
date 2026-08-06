@@ -187,11 +187,16 @@ static char ps2_scancode_to_ascii(uint8_t sc) {
  * 注意：这个函数在中断上下文中执行，只能访问 volatile 变量。
  */
 void keyboard_irq_handler(void) {
-    uint8_t sc = inb(0x60);                       /* 从 PS/2 控制器读取扫描码 */
-    uint16_t next_tail = (ps2_tail + 1) % PS2_BUFFER_SIZE;
-    if (next_tail != ps2_head) {                  /* 缓冲区未满 */
-        ps2_buffer[ps2_tail] = sc;                /* 写入扫描码 */
-        ps2_tail = next_tail;                     /* 更新尾指针 */
+    /* ⚠️ 与 ps2_mouse_irq_handler 同理：getchar 的读空循环（cli 下）
+     * 可能已把 FIFO 清空，此处 inb(0x60) 会读到空 FIFO 垃圾。
+     * 先查 OBF（bit0）再读，避免垃圾扫描码入缓冲。 */
+    if (inb(0x64) & 0x01) {
+        uint8_t sc = inb(0x60);                   /* 从 PS/2 控制器读取扫描码 */
+        uint16_t next_tail = (ps2_tail + 1) % PS2_BUFFER_SIZE;
+        if (next_tail != ps2_head) {              /* 缓冲区未满 */
+            ps2_buffer[ps2_tail] = sc;            /* 写入扫描码 */
+            ps2_tail = next_tail;                 /* 更新尾指针 */
+        }
     }
     pic_send_eoi(1);                              /* 发送 EOI 给 IRQ1 */
 }

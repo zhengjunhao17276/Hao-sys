@@ -146,6 +146,12 @@ void mouse_pointer_erase(void) {
 /** pointer_draw - 在指定位置绘制鼠标指针（固定图案 + 反显属性） */
 static void pointer_draw(int row, int col) {
     uint32_t fl = irq_lock();
+    /* ⚠️ 优化：位置未变则跳过重绘——高频移动时每个包都走
+     * "恢复旧位置→画新位置"，同位置时是无效的擦除+重画（闪烁）。 */
+    if (pointer_active && pointer_row == row && pointer_col == col) {
+        irq_unlock(fl);
+        return;
+    }
     /* 先恢复旧位置 */
     if (pointer_active) {
         VGA_ADDR[pointer_row * VGA_WIDTH + pointer_col] = pointer_under;
@@ -238,7 +244,15 @@ void mouse_poll(void) {
  * （IRQ12 已被 mouse_init 屏蔽），此函数保留供将来开启中断时使用。
  */
 void ps2_mouse_irq_handler(void) {
-    mouse_feed_byte(inb(0x60));
+    /* ⚠️ 修复：读 0x60 前先查状态寄存器 AUX 位（bit5）。
+     * 竞争场景：getchar 休眠唤醒后的 for(;;) 循环在 cli 下会把 PS/2
+     * FIFO 读空（鼠标字节喂给解析器）；之后 IRQ12 才触发，handler
+     * 此时 inb(0x60) 读到的是空 FIFO 的垃圾字节（0xFF 或旧值）——
+     * 多出的字节会把 3 字节包错位，鼠标位置乱跳（“猎奇”体验）。
+     * 查 bit5 再读：FIFO 已被清空则跳过，不产生垃圾包。 */
+    if (inb(0x64) & 0x20) {
+        mouse_feed_byte(inb(0x60));
+    }
     pic_send_eoi(12);  /* 发送 EOI 给 IRQ12 */
 }
 
