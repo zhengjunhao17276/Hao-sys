@@ -327,6 +327,14 @@ static void load_and_run_shell(void) {
         pmm_free_page((void*)stack_phys);
         return;
     }
+    /* 登记用户页供退出时回收（代码页 + 用户栈页） */
+    shell_task->user_virt_count = 0;
+    for (uint32_t pi = 0; pi < code_pages && shell_task->user_virt_count < 65; pi++) {
+        shell_task->user_virt_pages[shell_task->user_virt_count++] = code_virt + pi * 4096;
+    }
+    if (shell_task->user_virt_count < 65) {
+        shell_task->user_virt_pages[shell_task->user_virt_count++] = stack_virt;
+    }
     vga_write("[Shell] User task created (PID=");
     vga_write_hex(shell_task->pid);
     vga_write(").\n");

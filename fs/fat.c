@@ -783,7 +783,11 @@ bool fat_write_file(const char* filename, const void* data, uint32_t size) {
             memset(sector_buffer, 0, bytes_per_sector);
             uint32_t copy = (remaining < bytes_per_sector) ? remaining : bytes_per_sector;
             memcpy(sector_buffer, src, copy);
-            if (!write_sector(lba + s, sector_buffer)) return false;
+            if (!write_sector(lba + s, sector_buffer)) {
+                /* ⚠️ 修复：写扇区失败时释放已分配的簇链，避免磁盘空间永久泄漏 */
+                fat_free_chain(first_cluster);
+                return false;
+            }
             src += copy;
             remaining -= copy;
         }
@@ -862,25 +866,27 @@ bool fat_mkdir(const char* path) {
     dotdot.cluster_low = (uint16_t)(parent_cluster & 0xFFFF);
     dotdot.cluster_high = (uint16_t)((parent_cluster >> 16) & 0xFFFF);
 
-    if (!read_sector(lba, sector_buffer)) return false;
+    /* ⚠️ 修复：以下各失败点统一释放已分配的 new_cluster，避免泄漏 */
+    if (!read_sector(lba, sector_buffer)) { fat_free_chain(new_cluster); return false; }
     memcpy(sector_buffer, &dot, sizeof(dot));
     memcpy(sector_buffer + 32, &dotdot, sizeof(dotdot));
-    if (!write_sector(lba, sector_buffer)) return false;
+    if (!write_sector(lba, sector_buffer)) { fat_free_chain(new_cluster); return false; }
 
     /* 在父目录写新目录项（满则扩展） */
     uint32_t entry_sector, entry_offset;
     int slot = dir_find_slot(parent, name_83, &entry_sector, &entry_offset);
     if (slot == 0) {
-        if (parent == 0) return false;   /* 根目录固定区满 */
+        if (parent == 0) { fat_free_chain(new_cluster); return false; }   /* 根目录固定区满 */
         uint32_t new_lba;
-        if (!dir_extend(parent, &new_lba)) return false;
+        if (!dir_extend(parent, &new_lba)) { fat_free_chain(new_cluster); return false; }
         entry_sector = new_lba;
         entry_offset = 0;
     } else if (slot == 1) {
-        return false;   /* 同名已存在 */
+        fat_free_chain(new_cluster);   /* 同名已存在 */
+        return false;
     }
 
-    if (!read_sector(entry_sector, sector_buffer)) return false;
+    if (!read_sector(entry_sector, sector_buffer)) { fat_free_chain(new_cluster); return false; }
     fat_dirent_t* e = (fat_dirent_t*)(sector_buffer + entry_offset);
     for (int i = 0; i < 11; i++) e->name[i] = (uint8_t)name_83[i];
     e->attributes = 0x10;                  /* 目录属性 */
@@ -894,7 +900,7 @@ bool fat_mkdir(const char* path) {
     e->last_write_date = 0;
     e->cluster_low = (uint16_t)(new_cluster & 0xFFFF);
     e->file_size = 0;                      /* 目录大小为 0 */
-    if (!write_sector(entry_sector, sector_buffer)) return false;
+    if (!write_sector(entry_sector, sector_buffer)) { fat_free_chain(new_cluster); return false; }
 
     return true;
 }

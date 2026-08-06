@@ -72,6 +72,13 @@ typedef struct task_struct {
     /* ---- 地址空间 ---- */
     uint32_t* page_directory;  /* 页目录指针（独立地址空间用，当前统一为内核地址空间） */
 
+    /* ---- 用户页登记（退出时回收） ----
+     * 用户任务在共享页目录里映射的虚拟页：任务终止时由 free_task
+     * 逐一 unmap 并释放物理页，避免用户代码/栈物理页永久泄漏。
+     * 上限：load_and_run_shell 的 code_pages 保险丝 64 页 + 1 页用户栈。 */
+    uint32_t user_virt_pages[65];
+    uint32_t user_virt_count;
+
     /* ---- 链表 ---- */
     struct task_struct* next;  /* 指向下一个任务的指针（形成单向链表） */
 

@@ -210,6 +210,16 @@ static void init_gdt_tss(void) {
  */
 static void free_task(task_t* task) {
     if (!task) return;
+    /* ⚠️ 修复：回收用户任务映射的物理页（代码/用户栈）。
+     * 逐个 unmap + 释放——旧实现退出后这些页永久泄漏。 */
+    for (uint32_t i = 0; i < task->user_virt_count && i < 65; i++) {
+        uint32_t virt = task->user_virt_pages[i];
+        uint32_t phys = vmm_get_phys_addr(vmm_get_current_directory(), virt);
+        if (phys) {
+            vmm_unmap_page(vmm_get_current_directory(), virt);
+            pmm_free_page((void*)phys);
+        }
+    }
     if (task->kernel_esp0) {
         /* 内核栈在 PCB 之后单独分配，需要释放 */
         void* stack_page = (void*)(task->kernel_esp0 - PAGE_SIZE);
