@@ -1,7 +1,7 @@
 /*
  * keyboard.c - 统一键盘驱动（PS/2 中断 + USB 轮询）
  * 扫描码 → ASCII 转换（Make < 0x80，Break = Make + 0x80）；
- * 方向键拦截用于 VGA 光标移动，不作为字符返回。
+ * 方向键转为特殊码（0x01-0x04）返回，由 shell 行编辑处理。
  */
 
 #include "../include/driver/keyboard.h"
@@ -175,13 +175,15 @@ char keyboard_get_char(void) {
             uint8_t sc = ps2_buffer[ps2_head];
             ps2_head = (ps2_head + 1) % PS2_BUFFER_SIZE;
 
-            /* 方向键：Up/Down 返回特殊码给 shell（命令历史） */
+            /* 方向键：↑↓ 翻历史、←→ 移动光标（标准终端语义）。
+             * 返回 0x01-0x04 特殊码，与 ASCII 控制码不冲突：
+             * 0x03/0x04 是 ETX/EOT，扫描码映射里没有键会产生它们。 */
             if (!(sc & 0x80)) {
                 switch (sc) {
                     case 0x48: return 0x01;   /* Up → 历史上翻 */
                     case 0x50: return 0x02;   /* Down → 历史下翻 */
-                    case 0x4B: return '\b';  /* ← 当退格用：删光标前字符 */
-                    case 0x4D: vga_move_right(); continue;
+                    case 0x4B: return 0x03;   /* ← → 光标左移 */
+                    case 0x4D: return 0x04;   /* → → 光标右移 */
                     default: break;
                 }
             }

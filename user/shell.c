@@ -267,35 +267,63 @@ static int strncmp(const char* a, const char* b, unsigned int n) {
     return *a - *b;
 }
 
-/* 读一行：普通字符回显入缓冲，\b 退格，Enter 存历史，
- * 0x01/0x02（内核把方向键转成这两个码）翻历史 */
+/* ---- 行编辑（readline）：标准终端语义 ----
+ * ←/→ 移动光标，字符插入光标处，Backspace 删光标前字符，整行重绘。
+ * 内核把方向键转成特殊码（与 ASCII 控制码不冲突）：
+ *   0x01 = Up（历史向前翻），0x02 = Down（历史向后翻），
+ *   0x03 = ←（光标左移），0x04 = →（光标右移）。 */
 
 /* 命令历史（环形，最多 HIST_MAX 条） */
 #define HIST_MAX 8
+#define LINE_WIDTH 80          /* VGA 文本模式行宽（与内核 vga.h 一致） */
 static char history[HIST_MAX][128];
 static int hist_count = 0;    /* 历史条数 */
 static int hist_pos = 0;      /* 0=正在编辑，>0=浏览中的历史位置 */
 
-/* 用历史第 i 条填充编辑行并重绘，返回新行长度 */
+/* 把 VGA 光标定位到编辑行内第 pos 个字符处：
+ * 屏幕位置 = 输入起点(start_row,start_col) + pos，超宽自动换行 */
+static void line_set_cursor(int start_row, int start_col, unsigned int pos) {
+    set_cursor(start_row + (start_col + (int)pos) / LINE_WIDTH,
+               (start_col + (int)pos) % LINE_WIDTH);
+}
+
+/* 整行重绘：定位行首 → 重打 buf[0..len) → 行尾残留补空格 →
+ * 光标定位到 pos。disp_len 记屏幕当前显示长度（残留清除用）。 */
+static void line_redraw(int start_row, int start_col, const char* buf,
+                        unsigned int len, unsigned int* disp_len, unsigned int pos) {
+    set_cursor(start_row, start_col);
+    for (unsigned int i = 0; i < len; i++) putchar(buf[i]);
+    /* 新行比旧行短时，把尾部残留字符清成空格 */
+    for (unsigned int i = len; i < *disp_len; i++) putchar(' ');
+    *disp_len = len;
+    line_set_cursor(start_row, start_col, pos);
+}
+
+/* 用历史第 i 条填充编辑行并整行重绘，返回新行长度 */
 static unsigned int hist_apply(char* buf, unsigned int size, int i,
-                               int start_row, int start_col, unsigned int disp_len) {
-    /* 清掉当前显示内容 */
-    set_cursor(start_row, start_col);
-    for (unsigned int k = 0; k < disp_len; k++) putchar(' ');
-    set_cursor(start_row, start_col);
-    /* 填入历史条目 */
+                               int start_row, int start_col, unsigned int* disp_len) {
     const char* h = history[hist_count - i];
     unsigned int k = 0;
-    while (h[k] && k < size - 1) { buf[k] = h[k]; putchar(h[k]); k++; }
+    while (h[k] && k < size - 1) { buf[k] = h[k]; k++; }
     buf[k] = '\0';
+    line_redraw(start_row, start_col, buf, k, disp_len, k);
     return k;
 }
 
 /* 清掉当前编辑行显示 */
-static void hist_clear_line(int start_row, int start_col, unsigned int disp_len) {
-    set_cursor(start_row, start_col);
-    for (unsigned int k = 0; k < disp_len; k++) putchar(' ');
-    set_cursor(start_row, start_col);
+static void hist_clear_line(int start_row, int start_col, unsigned int* disp_len) {
+    line_redraw(start_row, start_col, "", 0, disp_len, 0);
+}
+
+/* buf[from..from+n) 整体右移一格（插入用；从尾往前复制防覆盖） */
+static void shift_right(char* buf, unsigned int from, unsigned int n) {
+    unsigned int i = n;
+    while (i > 0) { i--; buf[from + i + 1] = buf[from + i]; }
+}
+
+/* buf[from..from+n) 整体左移一格（退格用；从头往后复制防覆盖） */
+static void shift_left(char* buf, unsigned int from, unsigned int n) {
+    for (unsigned int i = 0; i < n; i++) buf[from + i - 1] = buf[from + i];
 }
 
 /* 存一条命令进历史（去重；满则整体前移丢最旧） */
@@ -323,12 +351,15 @@ static void hist_add(const char* line) {
     }
 }
 
+/* 读一行：字符插入光标处、←→ 移光标、Backspace 删光标前字符、
+ * ↑↓ 翻历史、Enter 返回。返回行长度。 */
 static unsigned int readline(char* buf, unsigned int size) {
-    unsigned int pos = 0;
-    unsigned int disp_len = 0;   /* 当前屏幕上显示的行长度 */
+    unsigned int pos = 0;      /* 光标位置（buf 内偏移） */
+    unsigned int len = 0;      /* 行长度 */
+    unsigned int disp_len = 0; /* 屏幕当前显示的行长度（残留清除用） */
     buf[0] = '\0';
 
-    /* 记录提示符位置（历史翻页重绘用） */
+    /* 记录输入起点（提示符后），重绘/光标定位用 */
     unsigned int cur = (unsigned int)get_cursor();
     int start_row = (int)(cur >> 16);
     int start_col = (int)(cur & 0xFFFF);
@@ -340,47 +371,58 @@ static unsigned int readline(char* buf, unsigned int size) {
             /* Up：历史向前翻 */
             if (hist_count > 0 && hist_pos < hist_count) {
                 hist_pos++;
-                disp_len = hist_apply(buf, size, hist_pos, start_row, start_col, disp_len);
-                pos = disp_len;
+                len = hist_apply(buf, size, hist_pos, start_row, start_col, &disp_len);
+                pos = len;
             }
         } else if (c == 0x02) {
             /* Down：历史向后翻 */
             if (hist_pos > 0) {
                 hist_pos--;
                 if (hist_pos == 0) {
-                    hist_clear_line(start_row, start_col, disp_len);
+                    hist_clear_line(start_row, start_col, &disp_len);
                     pos = 0;
-                    disp_len = 0;
+                    len = 0;
                     buf[0] = '\0';
                 } else {
-                    disp_len = hist_apply(buf, size, hist_pos, start_row, start_col, disp_len);
-                    pos = disp_len;
+                    len = hist_apply(buf, size, hist_pos, start_row, start_col, &disp_len);
+                    pos = len;
                 }
+            }
+        } else if (c == 0x03) {
+            /* ←：光标左移一格（只移光标，不重绘） */
+            if (pos > 0) {
+                pos--;
+                line_set_cursor(start_row, start_col, pos);
+            }
+        } else if (c == 0x04) {
+            /* →：光标右移一格（只移光标，不重绘） */
+            if (pos < len) {
+                pos++;
+                line_set_cursor(start_row, start_col, pos);
             }
         } else if (c == '\n' || c == '\r') {
             /* Enter：结束输入，输出换行，保存历史 */
             putchar('\n');
-            buf[pos] = '\0';
+            buf[len] = '\0';
             hist_add(buf);
             hist_pos = 0;
-            return pos;
+            return len;
         } else if (c == '\b') {
-            /* Backspace：回退一格。
-             * ⚠️ 修复：vga 的 '\b' 本身就是"左移 + 擦除"一步完成
-             * （putchar_core），旧代码按终端协议发 '\b 空格 \b' 三连
-             * 会擦两次——把前一个和后一个字符都抹掉（实测退格一次
-             * 少俩字符）。改单发 '\b'。 */
+            /* Backspace：删光标前字符，整行重绘 */
             if (pos > 0) {
+                shift_left(buf, pos, len - pos);
                 pos--;
-                putchar('\b');
-                disp_len--;
+                len--;
+                line_redraw(start_row, start_col, buf, len, &disp_len, pos);
             }
         } else if (c >= ' ' && c <= '~') {
-            /* 可打印字符 */
-            if (pos < size - 1) {
-                buf[pos++] = c;
-                putchar(c);      /* 回显 */
-                disp_len++;
+            /* 可打印字符：插入光标处，整行重绘 */
+            if (len < size - 1) {
+                shift_right(buf, pos, len - pos);
+                buf[pos] = c;
+                pos++;
+                len++;
+                line_redraw(start_row, start_col, buf, len, &disp_len, pos);
             }
             /* 缓冲区满——简单忽略 */
         }
