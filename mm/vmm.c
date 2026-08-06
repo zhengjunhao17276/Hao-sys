@@ -329,6 +329,17 @@ void vmm_init(void) {
     current_directory = kernel_page_directory;
     vmm_switch_directory(current_directory);
 
+    /* ⚠️ 关键修复：真正开启分页！
+     * 此前只写了 CR3（页目录基址）却从未设置 CR0.PG——分页从未生效，
+     * 整个系统一直运行在“假分页”（虚拟=物理）模式：
+     * 页表只是摆设，CPU 从不使用。低地址（<128MB 物理 RAM）时一切正常，
+     * 但用户空间搬到 256MB（0x10000000，物理不存在）后必然崩溃。
+     * 现在设置 CR0 的 PG 位（bit31），CR3 目录的 identity 映射立即生效。 */
+    uint32_t cr0;
+    __asm__ volatile ("mov %%cr0, %0" : "=r"(cr0));
+    cr0 |= 0x80000000;   /* CR0.PG = 1 */
+    __asm__ volatile ("mov %0, %%cr0" : : "r"(cr0) : "memory");
+
     vga_write("[VMM] Paging enabled with identity mapping over all physical memory.\n");
 }
 
@@ -355,12 +366,16 @@ uint32_t* vmm_create_directory(void) {
 
     zero_memory(dir, 1024 * sizeof(uint32_t));
 
-    /*
-     * 复制内核页目录的第 0 项（PDE[0]）。
-     * 这样新进程也能访问虚拟地址 0~4MB 的内核空间。
-     * 这是最简单的"内核共享"策略——所有进程共享低 4MB 的映射。
-     */
-    dir[0] = kernel_page_directory[0];
+    /* ⚠️ 架构升级（地址空间隔离）：复制内核**全部**页目录项。
+     * 用户目录共享内核页表（PTE 无 USER 位，用户态访问触发 #PF，安全）；
+     * 这样 syscall/IRQ 切换进内核后，内核代码、内核栈（物理页 < 128MB）
+     * 在用户目录下同样可访问。
+     * 旧实现只复制 PDE[0]（低 4MB）——一旦用户程序映射 4MB+ 区域
+     * （旧实现的做法）就会与内核身份映射冲突，且内核栈页在 4MB 以上时
+     * 用户目录下不可访问。 */
+    for (uint32_t i = 0; i < 1024; i++) {
+        dir[i] = kernel_page_directory[i];
+    }
 
     return dir;
 }
@@ -384,13 +399,11 @@ uint32_t* vmm_create_directory(void) {
 void vmm_destroy_directory(uint32_t* dir) {
     if (!dir) return;
 
-    /* 内核共享的低 4MB 页表（PDE[0] 指向的那张），绝不能释放：
-     * 它是 vmm_init 里 PMM 动态分配的、被所有目录共享的页表。
-     * 旧实现拿静态数组 kernel_first_page_table 的地址做比较，
-     * 但那个数组从未被使用过（死代码），判据永远不成立，
-     * 一旦调用 destroy 就会把内核共享页表也释放掉 → 双重释放。
-     * 正确做法：与内核页目录 PDE[0] 的物理地址（忽略标志位）比较。 */
-    uint32_t kernel_pt0_phys = kernel_page_directory[0] & 0xFFFFF000;
+    /* ⚠️ 架构升级：跳过**所有**与内核页目录相同的 PDE（共享内核页表，
+     * 绝不释放）——旧实现只跳过 PDE[0]，会误释放用户目录复制进来的
+     * 其他内核页表。 */
+    uint32_t kernel_pdes = (uint32_t)(pmm_get_memory_size() / (1024 * 4096)) + 1;
+    if (kernel_pdes > 1024) kernel_pdes = 1024;
 
     for (uint32_t i = 0; i < 1024; i++) {
         if (is_present(dir[i])) {
@@ -398,8 +411,16 @@ void vmm_destroy_directory(uint32_t* dir) {
              * PDE 格式：高 20 位 = 物理页基址，低 12 位 = 标志 */
             uint32_t pt_phys = dir[i] & 0xFFFFF000;
 
-            /* 跳过内核共享页表（以及任何与内核相同的页表） */
-            if (pt_phys == kernel_pt0_phys) continue;
+            /* 跳过内核共享页表（与内核页目录任一项相同的） */
+            bool is_kernel = false;
+            for (uint32_t k = 0; k < kernel_pdes; k++) {
+                if (is_present(kernel_page_directory[k]) &&
+                    (kernel_page_directory[k] & 0xFFFFF000) == pt_phys) {
+                    is_kernel = true;
+                    break;
+                }
+            }
+            if (is_kernel) continue;
 
             uint32_t* pt = (uint32_t*)pt_phys;
             free_pt(pt);
@@ -480,13 +501,21 @@ bool vmm_map_page(uint32_t* dir, uint32_t virt_addr, uint32_t phys_addr, uint32_
          * 从 PDE 中提取页表物理地址（高 20 位）。
          */
         if (flags & PAGE_USER) {
-            /* ⚠️ 修复：共享内核页表（PDE[0] 指向的，所有进程目录共用）
-             * 绝不能加 USER 位——否则整个低 4MB 内核代码/数据对用户态
-             * 开放（可读可写，权限提升）。用户进程在 0-4MB 区域映射
-             * 直接拒绝（该区域是内核保留区，用户程序应从 4MB 以上加载）。 */
+            /* ⚠️ 修复：共享内核页表（用户目录复制自内核页目录的 PDE）
+             * 绝不能加 USER 位——否则对应区域的物理内存对用户态开放。
+             * 用户进程只能在内核身份映射区之外（> 物理内存上限）映射。 */
             uint32_t pt_phys = dir[pd_idx] & 0xFFFFF000;
-            uint32_t kernel_pt0_phys = kernel_page_directory[0] & 0xFFFFF000;
-            if (pt_phys == kernel_pt0_phys) return false;
+            uint32_t kernel_pdes = (uint32_t)(pmm_get_memory_size() / (1024 * 4096)) + 1;
+            if (kernel_pdes > 1024) kernel_pdes = 1024;
+            bool is_kernel = false;
+            for (uint32_t k = 0; k < kernel_pdes; k++) {
+                if (is_present(kernel_page_directory[k]) &&
+                    (kernel_page_directory[k] & 0xFFFFF000) == pt_phys) {
+                    is_kernel = true;
+                    break;
+                }
+            }
+            if (is_kernel) return false;
 
             /*
              * 如果请求用户级访问，但 PDE 还没有设置 USER 位，

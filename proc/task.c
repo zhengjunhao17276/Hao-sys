@@ -210,13 +210,14 @@ static void init_gdt_tss(void) {
  */
 static void free_task(task_t* task) {
     if (!task) return;
-    /* ⚠️ 修复：回收用户任务映射的物理页（代码/用户栈）。
-     * 逐个 unmap + 释放——旧实现退出后这些页永久泄漏。 */
+    /* ⚠️ 架构升级：用户页映射在任务自己的页目录里，反查/解映射必须用
+     * task->page_directory（当前 CR3 可能是其他任务的目录）。 */
+    uint32_t* dir = task->page_directory ? task->page_directory : vmm_get_current_directory();
     for (uint32_t i = 0; i < task->user_virt_count && i < 65; i++) {
         uint32_t virt = task->user_virt_pages[i];
-        uint32_t phys = vmm_get_phys_addr(vmm_get_current_directory(), virt);
+        uint32_t phys = vmm_get_phys_addr(dir, virt);
         if (phys) {
-            vmm_unmap_page(vmm_get_current_directory(), virt);
+            vmm_unmap_page(dir, virt);
             pmm_free_page((void*)phys);
         }
     }
@@ -224,6 +225,10 @@ static void free_task(task_t* task) {
         /* 内核栈在 PCB 之后单独分配，需要释放 */
         void* stack_page = (void*)(task->kernel_esp0 - PAGE_SIZE);
         pmm_free_page(stack_page);
+    }
+    /* ⚠️ 架构升级：销毁用户任务独立的页目录（私有页表 + 目录页） */
+    if (task->page_directory && task->page_directory != vmm_get_current_directory()) {
+        vmm_destroy_directory(task->page_directory);
     }
     pmm_free_page(task);  /* 释放 PCB 页 */
 }
@@ -416,6 +421,16 @@ task_t* task_create_user(const char* name, void* entry, void* stack) {
         return NULL;
     }
 
+    /* ⚠️ 架构升级（地址空间隔离）：每个用户任务创建独立页目录。
+     * 目录复制内核全部页表（共享，无 USER 位），用户代码/栈
+     * 由 load_and_run_shell 映射到该目录的私有区域。 */
+    task->page_directory = vmm_create_directory();
+    if (!task->page_directory) {
+        pmm_free_page((void*)kstack);
+        pmm_free_page(task);
+        return NULL;
+    }
+
     /* 在任务自己的内核栈上布置上下文帧 */
     uint32_t* frame = (uint32_t*)((uint32_t)kstack + PAGE_SIZE);
 
@@ -445,7 +460,7 @@ task_t* task_create_user(const char* name, void* entry, void* stack) {
     task->eip = (uint32_t)entry;
     task->kernel_esp0 = (uint32_t)kstack + PAGE_SIZE;  /* 内核栈顶（用户态中断用） */
     task->is_user = true;  /* 用户态任务 */
-    task->page_directory = vmm_get_current_directory();
+    /* page_directory 已在上面创建（独立目录） */
 
     int i;
     for (i = 0; i < 31 && name && name[i]; i++)
@@ -569,6 +584,12 @@ void schedule(void) {
         current_task = next_task;
         current_task->state = TASK_RUNNING;
 
+        /* 同正常分支：切换 CR3 到目标任务页目录 */
+        if (current_task->page_directory &&
+            current_task->page_directory != vmm_get_current_directory()) {
+            vmm_switch_directory(current_task->page_directory);
+        }
+
         /* ⚠️ 修复：这里原来用 current_task == idle_task 判断任务类型，
          * 但 demo 这类内核任务不是 idle——被错误地走 switch_to_user，
          * iret 从 pusha 帧弹垃圾 → #GP。统一用 is_user 判断。 */
@@ -608,6 +629,14 @@ void schedule(void) {
     }
 
     current_task = next;
+
+    /* ⚠️ 架构升级（地址空间隔离）：切换 CR3 到目标任务页目录。
+     * 内核任务/idle 的 page_directory 就是内核目录，切换无效果；
+     * 用户任务切到自己的独立目录（复制了内核页表，切后内核代码
+     * 和内核栈仍可访问，安全）。 */
+    if (next->page_directory && next->page_directory != vmm_get_current_directory()) {
+        vmm_switch_directory(next->page_directory);
+    }
 
     /* 根据任务类型选择合适的切换方式。
      * ⚠️ 用 is_user 判断（kernel_esp0 对内核任务也非零，不能用作判据）：
@@ -664,9 +693,18 @@ void task_exit(void) {
 void task_dump_all(void) {
     task_t* t = task_list;
     vga_write("[TASK] Task list:\n");
+    vga_write("[TASK] task_list=");
+    vga_write_hex((uint32_t)(uintptr_t)task_list);
+    vga_write(" current=");
+    vga_write_hex((uint32_t)(uintptr_t)current_task);
+    vga_write("\n");
     while (t) {
         vga_write("  PID=");
         vga_write_hex(t->pid);
+        vga_write(" @");
+        vga_write_hex((uint32_t)(uintptr_t)t);
+        vga_write(" next=");
+        vga_write_hex((uint32_t)(uintptr_t)t->next);
         vga_write(" name='");
         vga_write(t->name);
         vga_write("' state=");

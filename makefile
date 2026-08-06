@@ -111,7 +111,7 @@ $(SHELL_OBJ): $(SHELL_SRC)
 	$(CC) -m32 -ffreestanding -nostdlib -fno-stack-protector -mno-red-zone -O0 -c $< -o $@
 
 $(SHELL_ELF): $(SHELL_OBJ)
-	$(LD) -m elf_i386 -Ttext 0x400000 -e main -o $@ $<
+	$(LD) -m elf_i386 -Ttext 0x10000000 -e main -o $@ $<
 
 $(SHELL_BIN): $(SHELL_ELF)
 	$(OBJCOPY) -O binary $< $@

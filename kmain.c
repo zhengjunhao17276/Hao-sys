@@ -183,44 +183,31 @@ static void load_and_run_shell(void) {
     vga_write_hex(code_pages);
     vga_write("\n");
 
-    /* ========== 3. 选择虚拟地址并建立映射 ========== */
-    /* 候选虚拟地址列表：Shell 有多种加载地址选择。
-     * 依次尝试每个地址，如果已被占用先解除映射，然后建立新映射。
-     * 
-     * 为什么不在固定地址加载？
-     *   不同系统可用地址范围不同，逐个尝试增加兼容性。
-     * PAGE_USER 标志允许用户态（ring 3）访问此页。 */
-    uint32_t virt_candidates[] = {
-        0x00400000,   // 4MB——Shell 链接地址
-        0x01000000,   // 16MB——通常空闲
-        0x02000000,   // 32MB
-        0x03000000,   // 48MB
-        0x10000000,   // 256MB
-    };
-    uint32_t code_virt = 0x00400000;
-    bool mapped = false;
-    for (size_t i = 0; i < sizeof(virt_candidates)/sizeof(uint32_t); i++) {
-        uint32_t test_virt = virt_candidates[i];
-        if (vmm_get_phys_addr(vmm_get_current_directory(), test_virt) != 0) {
-            /* 该虚拟地址已经映射了其他物理页，先解除映射 */
-            vga_write("[Shell] ");
-            vga_write_hex(test_virt);
-            vga_write(" already mapped, unmapping.\n");
-            vmm_unmap_page(vmm_get_current_directory(), test_virt);
-        }
-        if (vmm_map_page(vmm_get_current_directory(), test_virt, code_phys, PAGE_WRITE | PAGE_USER)) {
-            code_virt = test_virt;
-            mapped = true;
-            break;
-        } else {
-            vga_write("[Shell] Failed to map at ");
-            vga_write_hex(test_virt);
-            vga_write("\n");
-        }
+    /* ========== 3. 选择虚拟地址并创建用户任务 ========== */
+    /* ⚠️ 架构升级（地址空间隔离）：用户任务有独立页目录（复制内核页表），
+     * 但内核身份映射覆盖全部物理内存（128MB）——用户代码/栈只能映射到
+     * 内核映射区之外。固定用 256MB（0x10000000，内核未建页表）。 */
+    uint32_t code_virt = 0x10000000;
+    uint32_t stack_virt = code_virt + code_pages * 0x1000;
+
+    /* 先创建用户任务（task_create_user 内部创建独立页目录），
+     * 后续映射全部针对其目录 */
+    task_t* shell_task = task_create_user("shell", (void*)code_virt, (void*)stack_virt);
+    if (!shell_task) {
+        vga_write("[Shell] Failed to create user task.\n");
+        pmm_free_page((void*)code_phys);
+        return;
+    }
+    uint32_t* target_dir = shell_task->page_directory;
+    if (!target_dir) {
+        vga_write("[Shell] No page directory!\n");
+        pmm_free_page((void*)code_phys);
+        return;
     }
 
-    if (!mapped) {
-        vga_write("[Shell] No suitable virtual address found!\n");
+    /* 映射代码首页到用户目录 */
+    if (!vmm_map_page(target_dir, code_virt, code_phys, PAGE_WRITE | PAGE_USER)) {
+        vga_write("[Shell] Failed to map code page!\n");
         pmm_free_page((void*)code_phys);
         return;
     }
@@ -234,30 +221,21 @@ static void load_and_run_shell(void) {
         extra_phys[pi - 1] = (uint32_t)pmm_alloc_page();
         if (!extra_phys[pi - 1]) {
             vga_write("[Shell] Failed to allocate extra page.\n");
-            /* 释放已分配的额外页 + 代码页，解除代码页映射 */
             for (uint32_t j = 0; j < pi - 1; j++) pmm_free_page((void*)extra_phys[j]);
-            vmm_unmap_page(vmm_get_current_directory(), code_virt);
+            vmm_unmap_page(target_dir, code_virt);
             pmm_free_page((void*)code_phys);
             return;
         }
     }
-    /* 再统一映射（失败时解除全部映射并释放所有页） */
+    /* 再统一映射额外页（失败时解除全部映射并释放所有页） */
     for (uint32_t pi = 1; pi < code_pages; pi++) {
-        uint32_t extra_virt = code_virt + pi * 4096;
-        /* 先解除身份映射（如果存在） */
-        if (vmm_get_phys_addr(vmm_get_current_directory(), extra_virt) != 0) {
-            vmm_unmap_page(vmm_get_current_directory(), extra_virt);
-        }
-        if (!vmm_map_page(vmm_get_current_directory(), extra_virt, extra_phys[pi - 1], PAGE_WRITE | PAGE_USER)) {
+        if (!vmm_map_page(target_dir, code_virt + pi * 4096, extra_phys[pi - 1], PAGE_WRITE | PAGE_USER)) {
             vga_write("[Shell] Failed to map extra page at ");
-            vga_write_hex(extra_virt);
+            vga_write_hex(code_virt + pi * 4096);
             vga_write("\n");
-            /* 解除全部代码页映射 + 释放所有页（当前页未映射，可直接释放） */
             for (uint32_t j = 0; j < code_pages; j++) {
                 uint32_t v = code_virt + j * 4096;
-                if (vmm_get_phys_addr(vmm_get_current_directory(), v) != 0) {
-                    vmm_unmap_page(vmm_get_current_directory(), v);
-                }
+                if (vmm_get_phys_addr(target_dir, v) != 0) vmm_unmap_page(target_dir, v);
             }
             for (uint32_t j = 0; j < code_pages - 1; j++) pmm_free_page((void*)extra_phys[j]);
             pmm_free_page((void*)code_phys);
@@ -265,8 +243,20 @@ static void load_and_run_shell(void) {
         }
     }
 
-    /* 从 FAT 加载 SHELL.BIN */
-    uint32_t loaded = fat_load_file(&entry, (void*)code_virt, entry.file_size);
+    /* 从 FAT 加载 SHELL.BIN——⚠️ 不能直接用物理地址连续写：free_list
+     * 乱序分配导致代码物理页不连续，连续写会穿到其他页（实测覆盖了
+     * idle 的 PCB）。正确做法：在内核目录临时映射出连续虚拟地址，
+     * 加载后解除。 */
+    uint32_t load_virt = 0x20000000;   /* 内核目录未用区域 */
+    for (uint32_t pi = 0; pi < code_pages; pi++) {
+        uint32_t phys = (pi == 0) ? code_phys : extra_phys[pi - 1];
+        vmm_map_page(vmm_get_current_directory(), load_virt + pi * 4096, phys, PAGE_WRITE);
+    }
+
+    uint32_t loaded = fat_load_file(&entry, (void*)load_virt, entry.file_size);
+    for (uint32_t pi = 0; pi < code_pages; pi++) {
+        vmm_unmap_page(vmm_get_current_directory(), load_virt + pi * 4096);
+    }
     if (loaded != entry.file_size) {
         vga_write("[Shell] Load failed!\n");
         while(1) __asm__ volatile("hlt");
@@ -275,17 +265,17 @@ static void load_and_run_shell(void) {
     vga_write_hex(loaded);
     vga_write(" bytes. Executing...\n");
 
-
     /* ========== 6. 分配并映射用户栈 ========== */
-    /* 用户任务需要自己的栈。栈也分配一个物理页，映射到代码页之后
-     * 的虚拟地址（code_virt + 0x1000 = 4KB 之后）。
-     *
-     * 注意：用户栈也需要 PAGE_USER 标志！否则用户态程序无法压栈，
-     * 因为 push/pop/mov %esp 等指令访问没有用户权限的内存会触发 #GP。 */
+    /* ⚠️ 修复：用户栈映射 2 页。main 的 x86 序言
+     * （lea 4(%esp),%ecx; and $-16,%esp; push -4(%ecx)）会读栈顶
+     * 之上的 4 字节——1 页栈（栈顶=0x10006000 恰好越界）时触发 #PF。 */
     uint32_t stack_phys = (uint32_t)pmm_alloc_page();
-    if (!stack_phys) {
+    uint32_t stack_phys2 = (uint32_t)pmm_alloc_page();
+    if (!stack_phys || !stack_phys2) {
         vga_write("[Shell] Failed to allocate stack page.\n");
-        vmm_unmap_page(vmm_get_current_directory(), code_virt);
+        if (stack_phys) pmm_free_page((void*)stack_phys);
+        if (stack_phys2) pmm_free_page((void*)stack_phys2);
+        vmm_unmap_page(target_dir, code_virt);
         pmm_free_page((void*)code_phys);
         return;
     }
@@ -293,40 +283,31 @@ static void load_and_run_shell(void) {
     vga_write_hex(stack_phys);
     vga_write("\n");
 
-    uint32_t stack_virt = code_virt + code_pages * 0x1000;
-    if (vmm_get_phys_addr(vmm_get_current_directory(), stack_virt) != 0) {
-        vga_write("[Shell] Stack addr ");
-        vga_write_hex(stack_virt);
-        vga_write(" already mapped, unmapping.\n");
-        vmm_unmap_page(vmm_get_current_directory(), stack_virt);
-    }
-    if (!vmm_map_page(vmm_get_current_directory(), stack_virt, stack_phys, PAGE_WRITE | PAGE_USER)) {
+    if (!vmm_map_page(target_dir, stack_virt, stack_phys, PAGE_WRITE | PAGE_USER)) {
         vga_write("[Shell] Failed to map stack page at ");
         vga_write_hex(stack_virt);
         vga_write("\n");
         pmm_free_page((void*)stack_phys);
-        vmm_unmap_page(vmm_get_current_directory(), code_virt);
+        pmm_free_page((void*)stack_phys2);
+        vmm_unmap_page(target_dir, code_virt);
+        pmm_free_page((void*)code_phys);
+        return;
+    }
+    if (!vmm_map_page(target_dir, stack_virt + 0x1000, stack_phys2, PAGE_WRITE | PAGE_USER)) {
+        vga_write("[Shell] Failed to map stack page2 at ");
+        vga_write_hex(stack_virt + 0x1000);
+        vga_write("\n");
+        pmm_free_page((void*)stack_phys);
+        pmm_free_page((void*)stack_phys2);
+        vmm_unmap_page(target_dir, stack_virt);
+        vmm_unmap_page(target_dir, code_virt);
         pmm_free_page((void*)code_phys);
         return;
     }
     vga_write("[Shell] Stack mapped at ");
     vga_write_hex(stack_virt);
-    vga_write("\n");
+    vga_write(" (+1 guard page)\n");
 
-    /* ========== 7. 创建用户任务 ========== */
-    /* task_create_user 会在内核栈上布置 iret 返回帧：
-     *   SS=0x23, ESP=user_stack_top, EFLAGS=0x200, CS=0x1B, EIP=entry
-     * 首次切换到该任务时，switch_to_user 会执行 iret 指令，
-     * CPU 弹出这些值，从 ring 0 切换到 ring 3 执行用户代码。 */
-    task_t* shell_task = task_create_user("shell", (void*)code_virt, (void*)stack_virt);
-    if (!shell_task) {
-        vga_write("[Shell] Failed to create user task.\n");
-        vmm_unmap_page(vmm_get_current_directory(), code_virt);
-        vmm_unmap_page(vmm_get_current_directory(), stack_virt);
-        pmm_free_page((void*)code_phys);
-        pmm_free_page((void*)stack_phys);
-        return;
-    }
     /* 登记用户页供退出时回收（代码页 + 用户栈页） */
     shell_task->user_virt_count = 0;
     for (uint32_t pi = 0; pi < code_pages && shell_task->user_virt_count < 65; pi++) {
@@ -334,6 +315,9 @@ static void load_and_run_shell(void) {
     }
     if (shell_task->user_virt_count < 65) {
         shell_task->user_virt_pages[shell_task->user_virt_count++] = stack_virt;
+    }
+    if (shell_task->user_virt_count < 65) {
+        shell_task->user_virt_pages[shell_task->user_virt_count++] = stack_virt + 0x1000;
     }
     vga_write("[Shell] User task created (PID=");
     vga_write_hex(shell_task->pid);
@@ -348,9 +332,6 @@ static void load_and_run_shell(void) {
         vga_write_hex(demo_task->pid);
         vga_write(").\n");
     }
-
-    /* 打印所有任务状态供调试 */
-    task_dump_all();
 
     /* ⚠️ 修复：让调度器知道真正在运行的是 shell。
      * 之前 current_task 一直是 idle——裸 iret 进用户态后，
@@ -382,6 +363,10 @@ static void load_and_run_shell(void) {
      * 绝不能指向用户栈顶——否则内核中断帧会直接压在用户栈上，
      * 踩坏用户栈帧导致崩溃（实测：一按键就跳飞）。 */
     task_set_kernel_stack(shell_task->kernel_esp0);
+
+    /* ⚠️ 架构升级：切换 CR3 到 shell 的独立页目录（用户代码/栈映射在
+     * 该目录；内核目录里没有 256MB 虚拟区映射，不切会立即 #PF）。 */
+    vmm_switch_directory(shell_task->page_directory);
 
     vga_write("[Shell] Executing iret... code_virt=");
     vga_write_hex(code_virt);
