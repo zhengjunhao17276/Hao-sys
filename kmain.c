@@ -141,6 +141,11 @@ static void load_and_run_shell(void) {
     /* ========== 2. 分配 Shell 代码所需的物理页 ========== */
     /* 一个页 4KB，需要多页存放完整 Shell */
     uint32_t code_pages = (entry.file_size + 4095) / 4096;
+    if (code_pages > 64) {
+        /* 保险丝：SHELL.BIN 超过 256KB 直接拒绝（理论上不可能） */
+        vga_write("[Shell] SHELL.BIN too large (>256KB), refusing.\n");
+        return;
+    }
     uint32_t code_phys = (uint32_t)pmm_alloc_page();
     if (!code_phys) {
         vga_write("[Shell] Failed to allocate code page.\n");
@@ -197,22 +202,39 @@ static void load_and_run_shell(void) {
     vga_write_hex(code_virt);
     vga_write("\n");
 
-    /* 映射额外的物理页（Shell 代码超过一页时需要） */
+    /* 先一次性分配所有额外物理页（⚠️ 修复：失败时统一释放，不再泄漏） */
+    uint32_t extra_phys[64];
     for (uint32_t pi = 1; pi < code_pages; pi++) {
-        uint32_t extra_phys = (uint32_t)pmm_alloc_page();
-        if (!extra_phys) {
+        extra_phys[pi - 1] = (uint32_t)pmm_alloc_page();
+        if (!extra_phys[pi - 1]) {
             vga_write("[Shell] Failed to allocate extra page.\n");
+            /* 释放已分配的额外页 + 代码页，解除代码页映射 */
+            for (uint32_t j = 0; j < pi - 1; j++) pmm_free_page((void*)extra_phys[j]);
+            vmm_unmap_page(vmm_get_current_directory(), code_virt);
+            pmm_free_page((void*)code_phys);
             return;
         }
+    }
+    /* 再统一映射（失败时解除全部映射并释放所有页） */
+    for (uint32_t pi = 1; pi < code_pages; pi++) {
         uint32_t extra_virt = code_virt + pi * 4096;
         /* 先解除身份映射（如果存在） */
         if (vmm_get_phys_addr(vmm_get_current_directory(), extra_virt) != 0) {
             vmm_unmap_page(vmm_get_current_directory(), extra_virt);
         }
-        if (!vmm_map_page(vmm_get_current_directory(), extra_virt, extra_phys, PAGE_WRITE | PAGE_USER)) {
+        if (!vmm_map_page(vmm_get_current_directory(), extra_virt, extra_phys[pi - 1], PAGE_WRITE | PAGE_USER)) {
             vga_write("[Shell] Failed to map extra page at ");
             vga_write_hex(extra_virt);
             vga_write("\n");
+            /* 解除全部代码页映射 + 释放所有页（当前页未映射，可直接释放） */
+            for (uint32_t j = 0; j < code_pages; j++) {
+                uint32_t v = code_virt + j * 4096;
+                if (vmm_get_phys_addr(vmm_get_current_directory(), v) != 0) {
+                    vmm_unmap_page(vmm_get_current_directory(), v);
+                }
+            }
+            for (uint32_t j = 0; j < code_pages - 1; j++) pmm_free_page((void*)extra_phys[j]);
+            pmm_free_page((void*)code_phys);
             return;
         }
     }
@@ -356,7 +378,7 @@ void kmain(uint32_t magic, uint32_t info_addr) {
     }
     else {
         vga_write("[Auto] No filesystem, skipping shell load.\n");
-	while(true){}
+        while (1) __asm__ volatile ("hlt");   /* 修复：空闲时 HLT，别让 QEMU 宿主机 CPU 100% */
     }
     yield();
 }

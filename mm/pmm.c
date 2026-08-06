@@ -306,6 +306,18 @@ void pmm_init(uint32_t info_addr) {
                 if (base < 0xFFFFFFFF && length > 0) {
                     mark_region((uintptr_t)base, (size_t)length, true);
                 }
+            } else {
+                /* ⚠️ 修复：保留/ACPI/坏内存区域必须标为“不可用”。
+                 * 之前只处理 type=1，而步骤 3 已把 1MB 以上全部标为可用，
+                 * 导致 MMAP 里的保留区（ACPI 表、NVS、坏内存等）漏成
+                 * 可分配页——QEMU 下碰巧不炸，真机上可能把 ACPI 内存
+                 * 分给用户程序（写坏 ACPI 表 → 电源管理/关机异常）。 */
+                uint64_t base = entry->base_addr_low;
+                uint64_t length = entry->length_low;
+
+                if (base < 0xFFFFFFFF && length > 0) {
+                    mark_region((uintptr_t)base, (size_t)length, false);
+                }
             }
 
             /* 推进到下一条目：当前地址 + size + 4（size 字段本身占4字节） */

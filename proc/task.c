@@ -472,6 +472,14 @@ void yield(void) {
 void schedule(void) {
     if (!current_task) return;
 
+    /* ⚠️ 修复：调度关键段关闭中断。
+     * pusha 不保存 EFLAGS，内核任务经 switch_to 恢复时 IF 状态不受控；
+     * 若在 IF=1 下被 IRQ 打断，链表/current_task 会被并发修改 → 崩溃。
+     * 退出时用 popfl 还原原 IF 状态——不能在 IRQ 上下文（IF=0 进入）里
+     * 贸然 sti，否则会嵌套重入中断。 */
+    uint32_t saved_flags;
+    __asm__ volatile ("pushfl; popl %0; cli" : "=r"(saved_flags));
+
     /* ========== 终止任务处理 ========== */
     if (current_task->state == TASK_TERMINATED) {
         task_t* prev = NULL;
@@ -504,13 +512,13 @@ void schedule(void) {
         } else {
             switch_to_user(NULL, current_task);   /* 切换到用户任务（prev 已释放） */
         }
-        return;
+        goto out;
     }
 
     /* ========== 正常轮转调度 ========== */
     task_t* next = current_task->next;
     if (!next) next = task_list;                   /* 链表末尾回到开头 */
-    if (next == current_task) return;              /* 只有自己，无需切换 */
+    if (next == current_task) goto out;            /* 只有自己，无需切换 */
 
     /* 查找下一个就绪的任务，最多尝试 MAX_TASKS 次 */
     int tries = 0;
@@ -518,9 +526,9 @@ void schedule(void) {
         next = next->next;
         if (!next) next = task_list;
         tries++;
-        if (next == current_task) return;          /* 没有其他就绪任务 */
+        if (next == current_task) goto out;        /* 没有其他就绪任务 */
     }
-    if (next->state != TASK_READY) return;          /* 没有就绪任务 */
+    if (next->state != TASK_READY) goto out;       /* 没有就绪任务 */
 
     /* 更新 TSS.esp0——如果目标任务有内核栈，设置它为中断入口栈 */
     task_t* prev = current_task;
@@ -545,6 +553,8 @@ void schedule(void) {
             switch_to(prev, next);                 /* 内核任务切换 */
         }
     }
+out:
+    __asm__ volatile ("pushl %0; popfl" : : "r"(saved_flags));
 }
 
 /* ===================== 辅助函数 ===================== */

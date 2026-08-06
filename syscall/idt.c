@@ -136,8 +136,9 @@ void idt_init(void) {
 
     /* ---- 4. 系统调用门（int 0x80） ---- */
     /* flags=0xEE = 中断门，P=1, DPL=3
-     * 进入内核时 CPU 自动清除 IF。keyboard_get_char() 中用 sti; hlt
-     * 组合来确保 HLT 时 IF=1，可以被键盘中断唤醒。 */
+     * 进入内核时 CPU 自动清除 IF。
+     * ⚠️ 注意：keyboard_get_char() 实际是纯轮询（IF=0 下直接排空
+     * PS/2 状态寄存器），并不是 sti;hlt——历史注释与实现不符，已修正。 */
     idt_set_gate(0x80, (uint32_t)isr80_handler, 0x08, 0xEE);
 
     /* ---- 5. 加载 IDTR ---- */
