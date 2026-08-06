@@ -451,6 +451,14 @@ static uhci_td_t* uhci_alloc_td(void) {
     return &uhci_priv.td_pool[uhci_priv.td_used++];
 }
 
+/* ⚠️ 修复（USB 留意项 4）：线性池的栈式释放——只释放最近分配的 TD。
+ * 用于中断首提失败路径，避免 TD 泄漏（池 64 个，泄漏几次就耗尽）。 */
+static void uhci_free_td(uhci_td_t* td) {
+    if (td >= &uhci_priv.td_pool[0] && td < &uhci_priv.td_pool[uhci_priv.td_used]) {
+        uhci_priv.td_used--;
+    }
+}
+
 static void uhci_setup_td(uhci_td_t *td, uint32_t link, uint32_t ctrl_status,
                           uint32_t token, uint32_t buffer) {
     td->link = link;                    /* 链接指针：指向链表中的下一个节点 */
@@ -789,6 +797,7 @@ typedef struct {
     usb_urb_t *urb;     /* USB 请求块，包含参数和回调函数 */
     uhci_td_t *td;      /* 对应的传输描述符 */
     bool active;        /* 该中断传输是否仍在活跃状态 */
+    int dt;             /* ⚠️ 修复（留意项 1）：DATA toggle——每次重提交交替 */
 } uhci_int_urb_t;
 
 /* 中断传输 URB 表，最多跟踪 4 个活跃的中断传输 */
@@ -808,8 +817,14 @@ static int uhci_interrupt_transfer(usb_hc_t *hc, uint8_t dev_addr,
         uhci_int_urb_t *iu = &int_urbs[i];
         if (!iu->active && iu->urb && iu->td &&
             iu->urb->dev_addr == dev_addr && iu->urb->endpoint == ep) {
-            uint32_t token = (dev_addr << 8) | (ep << 15) | (0 << 19) | ((len - 1) << 21) | (TD_TOKEN_PID_IN << 0);
-            uhci_setup_td(iu->td, 0, TD_CTRL_IOC, token, (uint32_t)(uintptr_t)buffer);
+            /* ⚠️ 修复（留意项 1）：DATA toggle 交替——设备端按报告序号
+             * 交替 DATA0/DATA1，主机 TD 的 token bit19 必须同步，否则
+             * 真机（严格校验 toggle）第二次传输即失败。 */
+            iu->dt = !iu->dt;
+            uint32_t token = (dev_addr << 8) | (ep << 15) | ((iu->dt & 1) << 19) | ((len - 1) << 21) | (TD_TOKEN_PID_IN << 0);
+            /* ⚠️ 修复（留意项 2）：TD 链终止用 link=0x01（T 位），
+             * link=0 会让硬件尝试从物理地址 0 读下一个 TD。 */
+            uhci_setup_td(iu->td, 0x01, TD_CTRL_IOC, token, (uint32_t)(uintptr_t)buffer);
             schedule_qh->el_link = (uint32_t)(uintptr_t)iu->td;
             iu->urb->buffer = buffer;
             iu->urb->length = len;
@@ -829,14 +844,19 @@ static int uhci_interrupt_transfer(usb_hc_t *hc, uint8_t dev_addr,
 
     /* 构造令牌字：IN 传输，指定设备地址、端点和数据长度 */
     uint32_t token = (dev_addr << 8) | (ep << 15) | (0 << 19) | ((len - 1) << 21) | (TD_TOKEN_PID_IN << 0);
-    uhci_setup_td(td, 0, TD_CTRL_IOC, token, (uint32_t)(uintptr_t)buffer);
+    /* ⚠️ 修复（留意项 2）：link=0x01 终止（首提同样适用） */
+    uhci_setup_td(td, 0x01, TD_CTRL_IOC, token, (uint32_t)(uintptr_t)buffer);
 
     /* 挂到调度 QH 垂直链（bit0=0，qemu is_valid 要求） */
     schedule_qh->el_link = (uint32_t)(uintptr_t)td;
 
     /* 分配并初始化 URB 结构体，记录回调信息 */
     usb_urb_t *urb = (usb_urb_t*)pmm_alloc_page();
-    if (!urb) return -1;
+    if (!urb) {
+        /* ⚠️ 修复（留意项 4）：URB 分配失败释放刚分配的 TD——原实现泄漏 */
+        uhci_free_td(td);
+        return -1;
+    }
     urb->type = USB_URB_INTERRUPT;
     urb->dev_addr = dev_addr;
     urb->endpoint = ep;
@@ -849,6 +869,7 @@ static int uhci_interrupt_transfer(usb_hc_t *hc, uint8_t dev_addr,
     int_urbs[int_urb_count].urb = urb;
     int_urbs[int_urb_count].td = td;
     int_urbs[int_urb_count].active = true;
+    int_urbs[int_urb_count].dt = 0;   /* 首提 DATA0 */
     int_urb_count++;
     return 0;
 }
@@ -878,14 +899,19 @@ void usb_poll(void) {
             /* 硬件已处理完此 TD，传输完成 */
             int_urbs[i].active = false;
             usb_urb_t *urb = int_urbs[i].urb;
-            if (urb->callback) {
+            /* ⚠️ 修复（留意项 3）：检查 TD 错误位（STALL/BABBLE/CRC/
+             * 位填充/长度错误/DBUF）——出错时不调用回调，避免把陈旧
+             * 或损坏的数据交给上层。NAK 排除：中断 IN 无新数据时设备
+             * NAK 是正常现象（该 TD 会保持 ACTIVE 重试，走到这里时
+             * NAK 位通常不置位，保守起见仍排除）。 */
+            uint32_t err = td->ctrl_status &
+                (TD_CTRL_STALL | TD_CTRL_DBUF | TD_CTRL_BABBLE |
+                 TD_CTRL_CRCTIMEO | TD_CTRL_BITSTUFF | TD_CTRL_LENERR);
+            if (urb->callback && !err) {
                 /* 从 TD 控制状态字提取实际传输的长度（位 16-26） */
                 urb->length = (td->ctrl_status >> 16) & 0x7FF;
                 urb->callback(urb);   /* 调用上层注册的回调函数 */
             }
-            /* 注意：此处未重新提交 TD 以继续轮询设备。
-             * 实际驱动应在此处重新初始化 TD 并再次挂入
-             * 帧列表，以维持连续的中断传输轮询。*/
         }
     }
 }

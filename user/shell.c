@@ -791,8 +791,10 @@ static void settings_tui(void) {
         tui_draw(sel, sens, color_idx, glyph_idx);
 
         char c = getchar();
-        if (c == 'w' || c == 'W' || c == 's' || c == 'S') {
-            sel = (sel + 1) % 3;              /* 三项之间循环切换 */
+        if (c == 'w' || c == 'W') {
+            sel = (sel + 2) % 3;              /* 上移（循环） */
+        } else if (c == 's' || c == 'S') {
+            sel = (sel + 1) % 3;              /* 下移 */
         } else if (c == 'a' || c == 'A' || c == '-' || c == '_') {
             if (sel == 0) { if (sens > 1) sens--; }
             else if (sel == 1) { color_idx = (color_idx + COLOR_COUNT - 1) % COLOR_COUNT; }
