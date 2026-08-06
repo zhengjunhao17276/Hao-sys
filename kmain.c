@@ -410,5 +410,6 @@ void kmain(uint32_t magic, uint32_t info_addr) {
         vga_write("[Auto] No filesystem, skipping shell load.\n");
         while (1) __asm__ volatile ("hlt");   /* 修复：空闲时 HLT，别让 QEMU 宿主机 CPU 100% */
     }
-    yield();
+    /* 两个分支都不会返回（load_and_run_shell 内部已 iret 进用户态），
+     * 此处不再需要 yield()。 */
 }

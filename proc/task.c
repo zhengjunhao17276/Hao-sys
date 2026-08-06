@@ -221,36 +221,41 @@ static void free_task(task_t* task) {
 /* ===================== 初始化 ===================== */
 
 /**
+ * idle_loop - 空闲任务体
+ *
+ * 没有其他就绪任务时调度器会切到这里。
+ * HLT 停机等待（不开中断——键盘/鼠标是轮询驱动，不依赖 IRQ；
+ * 且开中断会被 IRQ 入口把当前 esp 写进 idle->esp，污染切换帧）。
+ */
+static void idle_loop(void) {
+    while (1) __asm__ volatile ("hlt");
+}
+
+/**
  * task_init - 初始化进程管理子系统
  *
  * 创建空闲任务（idle task）——当没有其他任务可运行时，
  * 调度器选择 idle 任务。
+ *
+ * ⚠️ 修复：idle 之前只有 PCB（esp=0/eip=0，无栈无代码），
+ * 一旦调度器真切到 idle（比如所有任务都终止），switch_to 会
+ * 从地址 0 弹栈 → 直接崩溃。现在用 task_create 给它完整的内核
+ * 栈 + 入口（idle_loop）。
  */
 void task_init(void) {
     vga_write("[TASK] Initializing task manager...\n");
     init_gdt_tss();
 
-    /* 分配空闲任务的 PCB 页 */
-    task_t* idle = (task_t*)pmm_alloc_page();
+    /* 用 task_create 创建 idle：自动分配 PCB + 内核栈，
+     * 布置好 switch_to 可恢复的初始上下文（entry=idle_loop） */
+    task_t* idle = task_create("idle", idle_loop);
     if (!idle) {
         vga_write("[TASK] ERROR: Failed to allocate idle task!\n");
         return;
     }
-    zero_memory(idle, PAGE_SIZE);
-
-    idle->pid = next_pid++;
     idle->state = TASK_RUNNING;
-    idle->esp = 0;
-    idle->eip = 0;
-    idle->kernel_esp0 = 0;
-    idle->is_user = false;
-    idle->page_directory = vmm_get_current_directory();
-    idle->next = NULL;
-    idle->name[0] = 'i';
-    idle->name[1] = 'd';
-    idle->name[2] = 'l';
-    idle->name[3] = 'e';
-    idle->name[4] = '\0';
+    idle->kernel_esp0 = 0;   /* idle 无用户态，不需要中断栈（语义清晰） */
+    idle->next = NULL;       /* idle 固定在链表尾 */
 
     task_list = idle;
     current_task = idle;

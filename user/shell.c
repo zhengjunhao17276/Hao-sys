@@ -888,8 +888,8 @@ void main(void) {
         write("$ ");
         protect();
 
-        /* 读取用户输入 */
-        unsigned int len = readline(line, sizeof(line));
+        /* 读取用户输入（返回长度未使用，readline 已写入 line） */
+        readline(line, sizeof(line));
 
         /* 执行命令 */
         execute(line);
