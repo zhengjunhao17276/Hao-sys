@@ -95,6 +95,22 @@ void pic_mask_irq(uint8_t irq, bool mask) {
 }
 
 /**
+ * pic_is_in_service - 查询指定 IRQ 的 In-Service (ISR) 位
+ * @irq: IRQ 号（0~15）
+ * @return true = 该 IRQ 正在被服务（真实中断），false = 伪中断
+ *
+ * 通过 OCW3（命令端口写 0x0B）读取 ISR 寄存器。
+ * 伪中断（Spurious IRQ7/IRQ15）时 ISR 位未置位——此时不应发 EOI，
+ * 否则会误清正在服务的真实中断（IRQ7/15 处理器用）。
+ */
+bool pic_is_in_service(uint8_t irq) {
+    uint16_t port = (irq < 8) ? PIC1_CMD : PIC2_CMD;
+    outb(port, 0x0B);              /* OCW3: 读 ISR */
+    uint8_t isr = inb(port);
+    return (isr >> (irq % 8)) & 1;
+}
+
+/**
  * pic_init - PIC 初始化快捷函数
  *
  * 将 PIC 重映射到 0x20/0x28（与 CPU 异常号 0-19 错开），

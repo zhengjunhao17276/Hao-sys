@@ -62,6 +62,11 @@ void pic_send_eoi(uint8_t irq);
 void pic_mask_irq(uint8_t irq, bool mask);
 
 /**
+ * pic_is_in_service - 查询 IRQ 的 In-Service 位（伪中断检测用）
+ */
+bool pic_is_in_service(uint8_t irq);
+
+/**
  * pic_init - PIC 初始化快捷函数
  *
  * 调用 pic_remap(0x20, 0x28) 完成重映射后，屏蔽所有 IRQ 再选择性

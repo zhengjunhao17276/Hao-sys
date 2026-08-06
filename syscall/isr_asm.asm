@@ -21,6 +21,7 @@
 extern keyboard_irq_handler
 extern ps2_mouse_irq_handler
 extern pic_send_eoi
+extern pic_is_in_service
 extern pit_tick_handler
 extern syscall_dispatcher
 extern current_task
@@ -266,9 +267,32 @@ irq%1_handler:
     %elif %1 == 1
         ; IRQ1 = PS/2 键盘
         call keyboard_irq_handler
+    %elif %1 == 7
+        ; ⚠️ 伪中断检测：IRQ7 是伪中断（Spurious）的高发线，
+        ; ISR 位未置位说明是伪中断，此时发 EOI 会误清真实中断。
+        push dword 7
+        call pic_is_in_service
+        add esp, 4
+        test eax, eax
+        jz %%spurious7
+        push dword 7
+        call pic_send_eoi
+        add esp, 4
+%%spurious7:
     %elif %1 == 12
         ; IRQ12 = PS/2 鼠标
         call ps2_mouse_irq_handler
+    %elif %1 == 15
+        ; ⚠️ 伪中断检测：IRQ15（从片）同理，从片 ISR 位未置位 = 伪中断
+        push dword 15
+        call pic_is_in_service
+        add esp, 4
+        test eax, eax
+        jz %%spurious15
+        push dword 15
+        call pic_send_eoi
+        add esp, 4
+%%spurious15:
     %else
         ; 其他 IRQ：直接发送 EOI 并返回
         push dword %2

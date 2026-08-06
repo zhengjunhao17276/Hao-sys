@@ -480,6 +480,14 @@ bool vmm_map_page(uint32_t* dir, uint32_t virt_addr, uint32_t phys_addr, uint32_
          * 从 PDE 中提取页表物理地址（高 20 位）。
          */
         if (flags & PAGE_USER) {
+            /* ⚠️ 修复：共享内核页表（PDE[0] 指向的，所有进程目录共用）
+             * 绝不能加 USER 位——否则整个低 4MB 内核代码/数据对用户态
+             * 开放（可读可写，权限提升）。用户进程在 0-4MB 区域映射
+             * 直接拒绝（该区域是内核保留区，用户程序应从 4MB 以上加载）。 */
+            uint32_t pt_phys = dir[pd_idx] & 0xFFFFF000;
+            uint32_t kernel_pt0_phys = kernel_page_directory[0] & 0xFFFFF000;
+            if (pt_phys == kernel_pt0_phys) return false;
+
             /*
              * 如果请求用户级访问，但 PDE 还没有设置 USER 位，
              * 需要补上，否则用户态代码访问时会触发页故障。

@@ -67,11 +67,20 @@ int sys_write(const char *str) {
     if (!str) return -1;
     if (!vmm_is_user_accessible((uint32_t)str)) return -1;
 
+    /* ⚠️ 修复：先扫描确认字符串在用户空间内是 NUL 终止的（最多 4096
+     * 字节，逐页校验）。避免把未终止的"字符串"当合法输入——旧实现会
+     * 静默输出满 4096 字节后才截断，无效输入产生部分输出。 */
+    bool terminated = false;
     for (uint32_t i = 0; i < 4096; i++) {
         /* 跨页边界时校验下一页 */
         if (i > 0 && (i & 0xFFF) == 0) {
-            if (!vmm_is_user_accessible((uint32_t)(str + i))) return -1;
+            if (!vmm_is_user_accessible((uint32_t)(str + i))) break;
         }
+        if (str[i] == '\0') { terminated = true; break; }
+    }
+    if (!terminated) return -1;
+
+    for (uint32_t i = 0; i < 4096; i++) {
         char c = str[i];
         if (c == '\0') break;
         vga_putchar(c);

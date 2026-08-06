@@ -218,6 +218,27 @@ static void free_task(task_t* task) {
     pmm_free_page(task);  /* 释放 PCB 页 */
 }
 
+/* ⚠️ 僵尸回收：被终止任务的 PCB/内核栈不能当场释放——
+ * schedule() 的终止分支正运行在被终止任务的内核栈上，
+ * 切到下一个任务前释放它会 use-after-free（旧实现踩的坑）。
+ * 做法：先挂入僵尸链表，等下次正常轮转切换前再统一回收。 */
+static task_t* zombie_list = NULL;
+
+/** 把已摘链的终止任务挂入僵尸链表（复用 next 字段） */
+static void free_task_later(task_t* task) {
+    task->next = zombie_list;
+    zombie_list = task;
+}
+
+/** 回收僵尸任务的内存（仅在当前任务栈安全时调用：正常轮转分支） */
+static void reap_zombies(void) {
+    while (zombie_list) {
+        task_t* z = zombie_list;
+        zombie_list = z->next;
+        free_task(z);
+    }
+}
+
 /* ===================== 初始化 ===================== */
 
 /**
@@ -510,7 +531,10 @@ void schedule(void) {
         }
 
         task_t* next_task = current_task->next;
-        free_task(current_task);                  /* 释放资源 */
+        /* ⚠️ 修复：不能当场 free_task——当前正运行在被终止任务自己的
+         * 内核栈上，切到下一个任务前释放它会 use-after-free。
+         * 挂入僵尸链表，由下次正常轮转统一回收。 */
+        free_task_later(current_task);
 
         if (!next_task) next_task = task_list;
         if (!next_task) {
@@ -560,6 +584,9 @@ void schedule(void) {
         if (next == current_task) goto out;        /* 没有其他就绪任务 */
     }
     if (next->state != TASK_READY) goto out;       /* 没有就绪任务 */
+
+    /* 找到就绪任务，切换前回收僵尸任务的内存（此时当前栈是活的，安全） */
+    reap_zombies();
 
     /* 更新 TSS.esp0——如果目标任务有内核栈，设置它为中断入口栈 */
     task_t* prev = current_task;
