@@ -77,10 +77,23 @@ static bool write_sector(uint32_t lba, const void* buffer) {
 static uint32_t read_fat_entry(uint32_t cluster) {
     if (fs_type == FAT12) {
         uint32_t fat_offset = cluster * 3 / 2;
+        uint32_t byte_off   = fat_offset % bytes_per_sector;
         uint32_t fat_sector = bpb.reserved_sectors + fat_offset / bytes_per_sector;
-        uint32_t offset = fat_offset % bytes_per_sector;
-        if (!read_sector(fat_sector, sector_buffer)) return 0x0FFFFFFF;
-        uint16_t val = *(uint16_t*)(sector_buffer + offset);
+        /* ⚠️ 修复：FAT12 表项可能跨扇区边界（奇簇时 fat_offset 落在
+         * 扇区末尾，低字节在 511、高字节在下一扇区 0）。旧实现直接
+         * *(uint16_t*)(sector_buffer+511) 越界读 1 字节。 */
+        uint8_t b0, b1;
+        if (byte_off + 1 < bytes_per_sector) {
+            if (!read_sector(fat_sector, sector_buffer)) return 0x0FFFFFFF;
+            b0 = sector_buffer[byte_off];
+            b1 = sector_buffer[byte_off + 1];
+        } else {
+            if (!read_sector(fat_sector, sector_buffer)) return 0x0FFFFFFF;
+            b0 = sector_buffer[byte_off];
+            if (!read_sector(fat_sector + 1, sector_buffer)) return 0x0FFFFFFF;
+            b1 = sector_buffer[0];
+        }
+        uint16_t val = (uint16_t)(b0 | (b1 << 8));
         if (cluster & 1) val >>= 4;
         else val &= 0x0FFF;
         return val;
@@ -306,17 +319,22 @@ uint32_t fat_read_root_dir(fat_dirent_t* entries, uint32_t max_entries) {
 }
 
 
+/* ⚠️ 目录扫描缓冲：绝不能放在栈上——fat_dirent_t 128 项 = 4KB，
+ * 而每个任务的内核栈只有 4KB（用户态中断栈），栈数组会把栈写穿
+ * 到栈页之下（PCB 页），是定时炸弹（实测侥幸未炸）。
+ * 内核单线程，全局缓冲安全。 */
+static fat_dirent_t dir_scan_entries[128];
+
 /* ============================================================
  *  在指定目录中按 8.3 名查找（内部）
  * ============================================================ */
 static bool dir_find_name(uint32_t dir_cluster, const char* name_83, fat_dirent_t* out_entry) {
-    fat_dirent_t entries[128];
-    uint32_t count = fat_read_dir(dir_cluster, entries, 128);
+    uint32_t count = fat_read_dir(dir_cluster, dir_scan_entries, 128);
     for (uint32_t k = 0; k < count; k++) {
         char dir_name[12];
-        for (int j = 0; j < 11; j++) dir_name[j] = to_upper(entries[k].name[j]);
+        for (int j = 0; j < 11; j++) dir_name[j] = to_upper(dir_scan_entries[k].name[j]);
         if (memcmp(dir_name, name_83, 11) == 0) {
-            if (out_entry) *out_entry = entries[k];
+            if (out_entry) *out_entry = dir_scan_entries[k];
             return true;
         }
     }
@@ -400,15 +418,42 @@ static void write_fat_entry(uint32_t cluster, uint32_t value) {
         fat_offset = cluster * 3 / 2;
         fat_sector = bpb.reserved_sectors + fat_offset / bytes_per_sector;
         offset = fat_offset % bytes_per_sector;
-        if (!read_sector(fat_sector, sector_buffer)) return;
-        uint16_t v = *(uint16_t*)(sector_buffer + offset);
+        /* ⚠️ 修复：同 read_fat_entry——FAT12 项可能跨扇区边界，
+         * 旧实现 *(uint16_t*)(sector_buffer+511) 越界写。 */
+        uint8_t b0, b1, old_lo = 0, old_hi = 0;
+        if (offset + 1 < bytes_per_sector) {
+            if (!read_sector(fat_sector, sector_buffer)) return;
+            b0 = sector_buffer[offset];
+            b1 = sector_buffer[offset + 1];
+        } else {
+            if (!read_sector(fat_sector, sector_buffer)) return;
+            b0 = sector_buffer[offset];
+            old_hi = sector_buffer[offset + 1];   /* 越界值丢弃（下一扇区头） */
+            if (!read_sector(fat_sector + 1, sector_buffer)) return;
+            b1 = sector_buffer[0];
+            old_lo = sector_buffer[1];
+        }
+        uint16_t v = (uint16_t)(b0 | (b1 << 8));
         if (cluster & 1)
             v = (uint16_t)((v & 0x000F) | ((value & 0x0FFF) << 4));
         else
             v = (uint16_t)((v & 0xF000) | (value & 0x0FFF));
-        *(uint16_t*)(sector_buffer + offset) = v;
-        write_sector(fat_sector, sector_buffer);
-        write_sector(fat_sector + fat_size, sector_buffer);
+        if (offset + 1 < bytes_per_sector) {
+            sector_buffer[offset]     = (uint8_t)(v & 0xFF);
+            sector_buffer[offset + 1] = (uint8_t)((v >> 8) & 0xFF);
+            write_sector(fat_sector, sector_buffer);
+            write_sector(fat_sector + fat_size, sector_buffer);
+        } else {
+            /* 跨扇区：低字节写本扇区尾，高字节写下一扇区头 */
+            sector_buffer[offset] = (uint8_t)(v & 0xFF);
+            write_sector(fat_sector, sector_buffer);
+            write_sector(fat_sector + fat_size, sector_buffer);
+            if (!read_sector(fat_sector + 1, sector_buffer)) return;
+            sector_buffer[0] = (uint8_t)((v >> 8) & 0xFF);
+            (void)old_lo; (void)old_hi;
+            write_sector(fat_sector + 1, sector_buffer);
+            write_sector(fat_sector + 1 + fat_size, sector_buffer);
+        }
     }
 }
 
@@ -645,12 +690,12 @@ bool fat_delete_file(const char* filename) {
 
     /* 目录：检查是否为空（只含 '.' 和 '..'）。
      * 注意：fat_read_dir 会复用 sector_buffer，因此空检查放在
-     * 修改目录项之前，且之后必须重新读扇区。 */
+     * 修改目录项之前，且之后必须重新读扇区。
+     * ⚠️ 用全局 dir_scan_entries（不能放栈上，4KB 会压爆内核栈）。 */
     if (is_dir && first_cluster >= 2) {
-        fat_dirent_t ents[128];
-        uint32_t n = fat_read_dir(first_cluster, ents, 128);
+        uint32_t n = fat_read_dir(first_cluster, dir_scan_entries, 128);
         for (uint32_t i = 0; i < n; i++) {
-            if (ents[i].name[0] == 0x2E) continue;   /* 跳过 '.' 和 '..' */
+            if (dir_scan_entries[i].name[0] == 0x2E) continue;   /* 跳过 '.' 和 '..' */
             return false;   /* 非空目录，拒绝删除 */
         }
     }

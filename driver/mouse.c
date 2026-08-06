@@ -275,12 +275,16 @@ static bool ps2_init(void) {
 }
 
 static void ps2_get_packet(int *x, int *y, int *buttons) {
-    __asm__ volatile ("cli");                        /* 关中断，防止竞态 */
+    /* ⚠️ 修复：保存/恢复 EFLAGS 而非 cli/sti——本函数可能在 syscall
+     * 上下文（IF=0）被调用，直接 sti 会提前开中断，让 IRQ 打断内核
+     * 代码。pushfl/popfl 精确还原原中断状态。 */
+    uint32_t flags;
+    __asm__ volatile ("pushfl; popl %0; cli" : "=r"(flags));
     mouse_poll();                                     /* 先消费待处理的鼠标数据 */
     *x = mouse_x;
     *y = mouse_y;
     *buttons = mouse_btn;
-    __asm__ volatile ("sti");                        /* 恢复中断 */
+    __asm__ volatile ("pushl %0; popfl" : : "r"(flags));
 }
 
 /* ==================== USB 后端 ==================== */
@@ -319,6 +323,9 @@ static void usb_process_report(uint8_t *data, int len) {
     if (mouse_y < 0) mouse_y = 0;
     if (mouse_y >= 25) mouse_y = 24;
     mouse_btn = rep->buttons & 0x07;
+    /* ⚠️ 修复：与 PS/2 路径一致地渲染指针——旧实现只更新坐标不画指针，
+     * USB 鼠标移动时屏幕上没有指针反馈。 */
+    pointer_draw(mouse_y, mouse_x);
 }
 
 /**
@@ -476,7 +483,8 @@ static bool usb_mouse_probe(void) {
 }
 
 static void usb_get_packet(int *x, int *y, int *buttons) {
-    __asm__ volatile ("cli");
+    uint32_t flags;
+    __asm__ volatile ("pushfl; popl %0; cli" : "=r"(flags));
     if (!usb_mouse_present) {
         *x = 0; *y = 0; *buttons = 0;
     } else {
@@ -484,7 +492,7 @@ static void usb_get_packet(int *x, int *y, int *buttons) {
         *y = mouse_y;
         *buttons = mouse_btn;
     }
-    __asm__ volatile ("sti");
+    __asm__ volatile ("pushl %0; popfl" : : "r"(flags));
 }
 
 /* ==================== 统一初始化 ==================== */

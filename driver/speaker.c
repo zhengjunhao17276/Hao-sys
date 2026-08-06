@@ -49,6 +49,9 @@ void speaker_beep(uint32_t freq_hz, uint32_t duration_ms) {
 
     /* PIT 输入时钟 1.1931816 MHz，除以目标频率得到分频数 */
     uint32_t divisor = 1193180 / freq_hz;
+    /* ⚠️ 修复：divisor 必须 ≤ 0xFFFF（PIT 16 位计数器）——
+     * freq < 18Hz 时旧实现截断发出错误频率。 */
+    if (divisor > 0xFFFF) divisor = 0xFFFF;
 
     /* 启用扬声器：将端口 0x61 的 bit 0（定时器门控）和 bit 1（扬声器数据）
      * 置位。bit 0 允许 PIT 通道 2 输出方波，bit 1 将方波信号送到扬声器。 */
