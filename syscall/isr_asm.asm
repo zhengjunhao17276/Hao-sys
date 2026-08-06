@@ -72,8 +72,10 @@ exc%1_handler:
 
     mov ebx, %1
     mov ecx, 2
+    ; ⚠️ 修复：取 bl（低字节）打印异常号——旧代码用 bh，
+    ; 任何 ≥1 的异常都会显示成 "EX:00"，误导调试。
     ; 高位 nibble 先打印
-    mov dl, bh
+    mov dl, bl
     shr dl, 4
     add dl, '0'
     cmp dl, '9'
@@ -84,7 +86,7 @@ exc%1_handler:
     mov byte [eax+1], 0x0F
     add eax, 2
     ; 低位 nibble
-    mov dl, bh
+    mov dl, bl
     and dl, 0x0F
     add dl, '0'
     cmp dl, '9'

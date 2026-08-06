@@ -104,6 +104,26 @@ bool kinit(uint32_t magic, uint32_t info_addr) {
 /* 声明外部汇编函数 */
 extern void switch_to_user(task_t* next);
 
+/* ==================== 多任务 yield 演示 ==================== */
+
+/**
+ * demo_task_entry - 演示内核任务
+ *
+ * 循环打印 tick 并让出 CPU。用于演示协作式调度的完整切换路径：
+ *   shell 执行命令后 yield → 切到 demo → demo 打印后 yield → 切回 shell
+ * 删除本段及 load_and_run_shell 中的创建代码即可移除演示。
+ */
+static void demo_task_entry(void) {
+    uint32_t tick = 0;
+    vga_write("[demo] task started.\n");
+    while (1) {
+        vga_write("[demo] tick ");
+        vga_write_hex(++tick);
+        vga_write("\n");
+        yield();
+    }
+}
+
 /**
  * load_and_run_shell - 从磁盘加载 SHELL.BIN 并切换到用户态执行
  *
@@ -304,6 +324,16 @@ static void load_and_run_shell(void) {
     vga_write("[Shell] User task created (PID=");
     vga_write_hex(shell_task->pid);
     vga_write(").\n");
+
+    /* ========== 7.5 创建演示内核任务 ==========
+     * 演示协作式多任务：shell 每次执行命令后 yield → 切到 demo，
+     * demo 打印后 yield → 切回 shell。删除本段即可移除演示。 */
+    task_t* demo_task = task_create("demo", demo_task_entry);
+    if (demo_task) {
+        vga_write("[Shell] Demo task created (PID=");
+        vga_write_hex(demo_task->pid);
+        vga_write(").\n");
+    }
 
     /* 打印所有任务状态供调试 */
     task_dump_all();

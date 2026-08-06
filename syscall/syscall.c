@@ -451,6 +451,15 @@ void syscall_dispatcher(regs_t *regs) {
             ret = sys_list(regs->ebx, regs->ecx, regs->edx);
             break;
 
+        case SYS_YIELD:
+            /* 让出 CPU（协作式调度测试用）。
+             * ⚠️ 注意：被调度器切回时走 switch_to_user 直接 iret 回
+             * 用户态，不会经过这里写返回值——所以此调用的返回值
+             * 不可用，调用方应忽略。 */
+            yield();
+            ret = 0;
+            break;
+
         case SYS_DELETE_FILE:
             /* ebx = 文件名 */
             ret = sys_delete_file(regs->ebx);

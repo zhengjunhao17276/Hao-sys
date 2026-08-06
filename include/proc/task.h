@@ -61,6 +61,13 @@ typedef struct task_struct {
     /* ---- 内核栈（用于用户态中断处理） ---- */
     uint32_t kernel_esp0;   /* 用户态任务的中断会切换到内核栈，此字段存栈顶 */
 
+    /* ---- 任务类型 ----
+     * ⚠️ 不能用 kernel_esp0 判断任务类型：task_create（内核任务）
+     * 也会设置 kernel_esp0（自己的内核栈顶）。
+     * 用户任务：esp 指向 iret 帧（EIP槽-4），恢复用 switch_to_user；
+     * 内核任务：esp 指向 pusha 帧，恢复用 switch_to。 */
+    bool is_user;           /* true=用户态任务，false=内核任务 */
+
     /* ---- 地址空间 ---- */
     uint32_t* page_directory;  /* 页目录指针（独立地址空间用，当前统一为内核地址空间） */
 

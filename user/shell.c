@@ -49,6 +49,7 @@
 #define SYS_UPTIME     23  /* 读开机时长 */
 #define SYS_MKDIR      24  /* 创建子目录 */
 #define SYS_LIST       25  /* 列目录 */
+#define SYS_YIELD      26  /* 让出 CPU（协作式调度测试） */
 
 /* FAT 目录项（与内核 fat_dirent_t 布局一致，32 字节） */
 struct dirent {
@@ -97,6 +98,11 @@ static void write(const char* s) {
 /** exit - 通过系统调用退出程序 */
 static void exit(int status) {
     __asm__ volatile ("int $0x80" : : "a"(4), "b"(status) : "memory");
+}
+
+/** yield - 通过系统调用让出 CPU（协作式调度测试） */
+static void yield(void) {
+    __asm__ volatile ("int $0x80" : : "a"(SYS_YIELD) : "memory");
 }
 
 /** getmouse - 通过系统调用获取鼠标状态 */
@@ -887,5 +893,8 @@ void main(void) {
 
         /* 执行命令 */
         execute(line);
+
+        /* 让出 CPU：触发一次 shell→demo→shell 切换（验证调度器） */
+        yield();
     }
 }

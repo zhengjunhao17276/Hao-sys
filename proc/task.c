@@ -243,6 +243,7 @@ void task_init(void) {
     idle->esp = 0;
     idle->eip = 0;
     idle->kernel_esp0 = 0;
+    idle->is_user = false;
     idle->page_directory = vmm_get_current_directory();
     idle->next = NULL;
     idle->name[0] = 'i';
@@ -315,6 +316,7 @@ task_t* task_create(const char* name, void (*entry)(void)) {
     task->pid = next_pid++;
     task->state = TASK_READY;
     task->kernel_esp0 = (uint32_t)stack + PAGE_SIZE;  /* 内核栈顶 */
+    task->is_user = false;  /* 内核任务 */
     task->page_directory = vmm_get_current_directory();
 
     /* 复制任务名 */
@@ -400,6 +402,7 @@ task_t* task_create_user(const char* name, void* entry, void* stack) {
     task->esp = (uint32_t)frame;              /* 栈指针指向内核栈上的 iret 帧 */
     task->eip = (uint32_t)entry;
     task->kernel_esp0 = (uint32_t)kstack + PAGE_SIZE;  /* 内核栈顶（用户态中断用） */
+    task->is_user = true;  /* 用户态任务 */
     task->page_directory = vmm_get_current_directory();
 
     int i;
@@ -542,15 +545,21 @@ void schedule(void) {
     current_task = next;
 
     /* 根据任务类型选择合适的切换方式。
+     * ⚠️ 用 is_user 判断（kernel_esp0 对内核任务也非零，不能用作判据）：
+     *   - 切换到用户任务 → switch_to_user（从 iret 帧恢复）
+     *   - 切换到内核任务 → switch_to（从 pusha 帧恢复）
      * prev 若是用户任务，其 esp 已由中断入口（isr80_handler/IRQ）
      * 保存到 PCB，不能再被 pusha 的栈指针覆盖 → 传 NULL。 */
     if (next == idle_task) {
-        switch_to(prev->kernel_esp0 == 0 ? prev : NULL, next);  /* 内核任务切换 */
+        switch_to(!prev->is_user ? prev : NULL, next);  /* 内核任务切换 */
     } else {
-        if (next->kernel_esp0 != 0) {
-            switch_to_user(prev->kernel_esp0 == 0 ? prev : NULL, next);  /* 用户任务切换 */
+        if (next->is_user) {
+            switch_to_user(!prev->is_user ? prev : NULL, next);  /* 用户任务切换 */
         } else {
-            switch_to(prev, next);                 /* 内核任务切换 */
+            switch_to(!prev->is_user ? prev : NULL, next);  /* 内核任务切换：
+                 prev 是用户任务时必须传 NULL——它的上下文由中断入口保存，
+                 pusha 会覆盖 iret 帧指针（实测：shell→demo 时把深层栈指针
+                 写进 shell->esp，切回时 iret 弹垃圾帧 → #GP） */
         }
     }
 out:

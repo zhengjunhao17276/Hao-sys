@@ -60,6 +60,7 @@
 #define SYS_UPTIME     23 /* 读开机时长（秒） */
 #define SYS_MKDIR      24 /* 创建子目录（ebx=路径） */
 #define SYS_LIST       25 /* 列目录（ebx=路径, ecx=目录项数组, edx=最大数） */
+#define SYS_YIELD      26 /* 让出 CPU（协作式调度；返回值不可用） */
 
 /**
  * regs_t - 寄存器上下文结构体
