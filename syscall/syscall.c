@@ -30,6 +30,7 @@
 #include "../include/driver/keyboard.h"
 #include "../include/driver/mouse.h"
 #include "../include/driver/ata.h"
+#include "../include/driver/usb.h"
 #include "../include/mm/vmm.h"
 #include "../include/fs/fat.h"
 #include "../include/proc/task.h"
@@ -340,6 +341,37 @@ static int sys_uptime(void) {
 /* ==================== 分发器 ==================== */
 
 /**
+/* sys_usb_info - 打印枚举的 USB 设备列表与 MSC 状态（调试/验证用） */
+static int sys_usb_info(void) {
+    usb_device_t *dev = usb_get_device_list();
+    int n = 0;
+    while (dev) {
+        vga_write("[USB] dev addr=");
+        vga_write_hex(dev->address);
+        vga_write(" VID=");
+        vga_write_hex(dev->dev_desc.idVendor);
+        vga_write(" PID=");
+        vga_write_hex(dev->dev_desc.idProduct);
+        vga_write(" class=");
+        vga_write_hex(dev->dev_desc.bDeviceClass);
+        vga_write("\n");
+        dev = dev->next;
+        n++;
+    }
+    vga_write("[USB] total devices: ");
+    vga_write_hex(n);
+    vga_write("\n");
+    if (usb_msc_present()) {
+        vga_write("[USB MSC] present, ");
+        vga_write_hex(usb_msc_get_sector_count());
+        vga_write(" sectors x 512B\n");
+    } else {
+        vga_write("[USB MSC] not present\n");
+    }
+    return 0;
+}
+
+/**
  * syscall_dispatcher - 系统调用分发器
  * @regs: 中断上下文保存的寄存器值（见 regs_t 结构）
  *
@@ -475,6 +507,10 @@ void syscall_dispatcher(regs_t *regs) {
         case SYS_DELETE_FILE:
             /* ebx = 文件名 */
             ret = sys_delete_file(regs->ebx);
+            break;
+
+        case SYS_USB_INFO:
+            ret = sys_usb_info();
             break;
 
         default:

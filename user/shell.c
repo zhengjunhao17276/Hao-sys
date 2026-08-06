@@ -49,7 +49,8 @@
 #define SYS_UPTIME     23  /* 读开机时长 */
 #define SYS_MKDIR      24  /* 创建子目录 */
 #define SYS_LIST       25  /* 列目录 */
-#define SYS_YIELD      26  /* 让出 CPU（协作式调度测试） */
+#define SYS_YIELD      26
+#define SYS_USB_INFO   27  /* 让出 CPU（协作式调度测试） */
 
 /* FAT 目录项（与内核 fat_dirent_t 布局一致，32 字节） */
 struct dirent {
@@ -813,6 +814,11 @@ static void settings_tui(void) {
     set_cursor(24, 0);
 }
 
+/** cmd_usb - 显示 USB 设备列表与 MSC 状态 */
+static void cmd_usb(const char* args) { (void)args;
+    __asm__ volatile ("int $0x80" : : "a"(SYS_USB_INFO) : "memory");
+}
+
 /** cmd_settings - settings 命令入口 */
 static void cmd_settings(const char* args) { (void)args;
     settings_tui();
@@ -840,6 +846,7 @@ static command_t commands[] = {
     { "time",  cmd_time },
     { "busy",  cmd_busy },
     { "uptime", cmd_uptime },
+    { "usb",   cmd_usb },
     { "settings", cmd_settings },
     { "set",   cmd_settings },
     { "exit",  cmd_exit },
