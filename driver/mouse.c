@@ -91,7 +91,7 @@ static uint8_t ps2_pkt[3];
  *   4 = 四分之一速
  * 运行时可通过 mouse_set_sensitivity() 调整（settings TUI 用）。
  */
-#define MOUSE_SENSITIVITY_DEFAULT 2
+#define MOUSE_SENSITIVITY_DEFAULT 8   /* 用户要求默认速度 8 */
 
 /** 当前鼠标灵敏度（1~16） */
 static int mouse_sensitivity = MOUSE_SENSITIVITY_DEFAULT;
@@ -116,8 +116,9 @@ static uint16_t pointer_under = 0x0F20;
  *   0xB2 ▓ 深阴影    0xB1 ▒ 中阴影   0xB0 ░ 浅阴影
  *   0x10 ► 右箭头    0x11 ◄ 左箭头   0x1E ▲ 上箭头   0x1F ▼ 下箭头
  * 运行时可通过 mouse_set_pointer_glyph() 调整（settings TUI 用）。
+ * ⚠️ 默认改为箭头（0x1E ▲，最接近鼠标光标形状）——用户要求。
  */
-#define MOUSE_POINTER_GLYPH_DEFAULT 0xDB
+#define MOUSE_POINTER_GLYPH_DEFAULT 0x1E
 
 /** 当前鼠标指针图案（0~255） */
 static uint8_t pointer_glyph = MOUSE_POINTER_GLYPH_DEFAULT;
