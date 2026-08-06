@@ -75,7 +75,7 @@ static int64_t days_from_civil(int y, unsigned m, unsigned d) {
     return (int64_t)era * 146097 + (int64_t)doe - 719468;
 }
 
-/** 开机时刻的 epoch 秒（rtc_init 时记录） */
+/* 开机时刻的 epoch 秒（rtc_init 时记录） */
 static uint32_t boot_epoch = 0;
 static bool boot_epoch_set = false;
 

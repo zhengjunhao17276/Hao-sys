@@ -25,31 +25,29 @@
 
 /* ---- 函数声明 ---- */
 
-/** 初始化分页：身份映射全物理内存并打开 CR0.PG */
+/* 初始化分页：身份映射全物理内存并打开 CR0.PG */
 void vmm_init(void);
 
-/** 创建新页目录（复制内核全部 PDE 共享内核页表），失败返回 NULL */
+/* 创建新页目录（复制内核全部 PDE 共享内核页表），失败返回 NULL */
 uint32_t* vmm_create_directory(void);
 
-/** 销毁页目录：释放非内核页表，再释放页目录自身 */
+/* 销毁页目录：释放非内核页表，再释放页目录自身 */
 void vmm_destroy_directory(uint32_t* dir);
 
-/** 映射 virt→phys（自动对齐 4KB，页表不存在会自动分配；映射已存在返回 false） */
+/* 映射 virt→phys（自动对齐 4KB，页表不存在会自动分配；映射已存在返回 false） */
 bool vmm_map_page(uint32_t* dir, uint32_t virt_addr, uint32_t phys_addr, uint32_t flags);
 
-/** 解除映射（不释放物理页） */
+/* 解除映射（不释放物理页） */
 bool vmm_unmap_page(uint32_t* dir, uint32_t virt_addr);
 
-/** 该页是否已映射且带 PAGE_USER。syscall 校验用户指针用，不能盲目解引用用户地址 */
+/* 该页是否已映射且带 PAGE_USER。syscall 校验用户指针用，不能盲目解引用用户地址 */
 bool vmm_is_user_accessible(uint32_t virt_addr);
 
-/** 查虚拟地址对应的物理地址（含页内偏移），未映射返回 0 */
+/* 查虚拟地址对应的物理地址（含页内偏移），未映射返回 0 */
 uint32_t vmm_get_phys_addr(uint32_t* dir, uint32_t virt_addr);
 
-/** 切换页目录（进程上下文切换时用） */
 void vmm_switch_directory(uint32_t* dir);
 
-/** 当前页目录指针 */
 uint32_t* vmm_get_current_directory(void);
 
 #endif

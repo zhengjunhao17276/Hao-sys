@@ -45,47 +45,38 @@ static bool ps2_send_command(uint8_t cmd) {
 }
 
 
-/** 当前数据包的字节计数（凑齐 3 字节 = 一个完整数据包） */
+/* 当前数据包的字节计数（凑齐 3 字节 = 一个完整数据包） */
 static uint8_t ps2_pkt_cycle = 0;
-/** 3 字节数据包缓存 */
 static uint8_t ps2_pkt[3];
 
 
 /* 位移 ÷ 灵敏度 = 光标位移（settings TUI 可调） */
 #define MOUSE_SENSITIVITY_DEFAULT 8   /* 用户要求默认速度 8 */
 
-/** 当前鼠标灵敏度（1~16） */
+/* 当前鼠标灵敏度（1~16） */
 static int mouse_sensitivity = MOUSE_SENSITIVITY_DEFAULT;
 
-/** 位移累加器（保留除法余数，保证小位移不丢失） */
+/* 位移累加器（保留除法余数，保证小位移不丢失） */
 static int ps2_acc_x = 0;
 static int ps2_acc_y = 0;
 
 
-/** 指针当前是否可见 */
 static bool pointer_active = false;
-/** 指针所在位置 */
 static int pointer_row = 0, pointer_col = 0;
-/** 指针下方的原始字符+属性（移动时恢复） */
+/* 指针下方的原始字符+属性（移动时恢复） */
 static uint16_t pointer_under = 0x0F20;
 
 /* 指针图案（CP437）：0xDB █ 实心、0xB2 ▓、0x10 ►、0x1E ▲ ……
  * ⚠️ 默认用箭头 0x1E（用户要求，最接近鼠标形状） */
 #define MOUSE_POINTER_GLYPH_DEFAULT 0x1E
 
-/** 当前鼠标指针图案（0~255） */
 static uint8_t pointer_glyph = MOUSE_POINTER_GLYPH_DEFAULT;
 
-/** 属性反转：交换前景/背景 nibble（反显效果） */
 static uint8_t invert_attr(uint8_t attr) {
     return (uint8_t)(((attr & 0x0F) << 4) | ((attr >> 4) & 0x0F));
 }
 
-/**
- * mouse_pointer_erase - 擦除鼠标指针（恢复被覆盖的字符）
- *
- * 由 vga.c 在一切文本输出前调用，防止输出字符和指针互相踩踏。
- */
+/* 由 vga.c 在一切文本输出前调用，防止输出字符和指针互相踩踏 */
 void mouse_pointer_erase(void) {
     /* ⚠️ 内核态抢占：指针状态与显存写入必须与 vga 输出（持锁）互斥。
      * 本函数可能从 vga 锁内（putchar_core）或 IRQ12 上下文调用，

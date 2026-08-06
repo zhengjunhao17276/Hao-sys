@@ -14,16 +14,12 @@ extern uint8_t _end[];
 
 /* 全局变量 */
 
-/** 位图基指针（指向位图数据在物理内存中的位置） */
 static uint8_t *bitmap = NULL;
 
-/** 物理内存总页数 = total_memory / 4096 */
 static size_t total_pages = 0;
 
-/** 当前空闲页数（用于快速查询，避免遍历位图） */
 static size_t free_pages = 0;
 
-/** 物理内存总大小（字节） */
 static size_t total_memory = 0;
 
 /* ⚠️ 架构升级：空闲页链表实现 O(1) 分配/释放。
@@ -32,23 +28,19 @@ static size_t total_memory = 0;
 static uint32_t free_list_head = (uint32_t)-1;   /* -1 = 空链表 */
 
 
-/** 物理地址 → 位图索引 */
 static inline size_t addr_to_index(uintptr_t addr) {
     return addr / 4096;
 }
 
-/** 位图索引 → 物理地址 */
 static inline uintptr_t index_to_addr(size_t idx) {
     return idx * 4096;
 }
 
 
-/** 读第 idx 页的状态，true = 空闲 */
 static inline bool get_page_bit(size_t idx) {
     return (bitmap[idx / 8] >> (idx % 8)) & 1;
 }
 
-/** 设置第 idx 页的状态，available=true 标记为空闲 */
 static inline void set_page_bit(size_t idx, bool available) {
     if (available)
         bitmap[idx / 8] |= (1 << (idx % 8));
@@ -71,9 +63,7 @@ static void mark_region(uintptr_t start, size_t length, bool available) {
 }
 
 
-/**
- * 初始化 PMM：取内存总量，建位图，标记可用/保留区，最后把空闲页挂链表。
- */
+/* 初始化 PMM：取内存总量，建位图，标记可用/保留区，最后把空闲页挂链表 */
 void pmm_init(uint32_t info_addr) {
     multiboot_info_t *info = (multiboot_info_t*)info_addr;
 
@@ -211,7 +201,6 @@ void pmm_init(uint32_t info_addr) {
 }
 
 
-/** 从空闲链表头取一页，O(1)；失败返回 NULL */
 void* pmm_alloc_page(void) {
     /* ⚠️ 从链表头取页，替代旧的线性扫描位图 */
     if (free_list_head == (uint32_t)-1) return NULL;
@@ -222,10 +211,8 @@ void* pmm_alloc_page(void) {
     return (void*)index_to_addr(idx);
 }
 
-/**
- * 分配 count 个物理连续的页（DMA 用）。
- * ⚠️ 链表分配不保证连续，这里保留线性扫描；只在初始化阶段调用，开销可接受。
- */
+/* 分配 count 个物理连续的页（DMA 用）。
+ * ⚠️ 链表分配不保证连续，这里保留线性扫描；只在初始化阶段调用，开销可接受。 */
 void* pmm_alloc_contiguous(uint32_t count) {
     if (count == 0) return NULL;
     for (size_t i = 0; i < total_pages; i++) {
@@ -258,9 +245,7 @@ void* pmm_alloc_contiguous(uint32_t count) {
 }
 
 
-/**
- * 释放一页。越界直接忽略；重复释放靠位图挡掉，不会重复计数。
- */
+/* 释放一页。越界直接忽略；重复释放靠位图挡掉，不会重复计数。 */
 void pmm_free_page(void* addr) {
     uintptr_t paddr = (uintptr_t)addr;
     size_t idx = addr_to_index(paddr);
@@ -278,13 +263,11 @@ void pmm_free_page(void* addr) {
 }
 
 
-/** 物理内存总字节数 */
 size_t pmm_get_memory_size(void) {
     return total_memory;
 }
 
 
-/** 当前空闲页数 */
 size_t pmm_get_free_pages(void) {
     return free_pages;
 }

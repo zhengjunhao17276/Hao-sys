@@ -21,14 +21,13 @@
 
 #include <stdint.h>
 
-/** 关中断，返回原 EFLAGS（传给 irq_unlock 恢复用） */
+/* 关中断，返回原 EFLAGS（传给 irq_unlock 恢复用） */
 static inline uint32_t irq_lock(void) {
     uint32_t flags;
     __asm__ volatile ("pushfl; popl %0; cli" : "=r"(flags) : : "memory");
     return flags;
 }
 
-/** 恢复中断状态 */
 static inline void irq_unlock(uint32_t flags) {
     __asm__ volatile ("pushl %0; popfl" : : "r"(flags) : "memory");
 }

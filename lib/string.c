@@ -6,14 +6,13 @@
 
 #include "../include/lib/string.h"
 
-/** 前 n 字节置为 c；c 实际按 unsigned char 处理 */
 void* memset(void* s, int c, size_t n) {
     unsigned char* p = (unsigned char*)s;
     while (n--) *p++ = (unsigned char)c;
     return s;
 }
 
-/** 拷贝 n 字节。⚠️ 不处理重叠（重叠该用 memmove），目前调用方都不会重叠 */
+/* 拷贝 n 字节。⚠️ 不处理重叠（重叠该用 memmove），目前调用方都不会重叠 */
 void* memcpy(void* dest, const void* src, size_t n) {
     unsigned char* d = (unsigned char*)dest;
     const unsigned char* s = (const unsigned char*)src;
@@ -21,7 +20,6 @@ void* memcpy(void* dest, const void* src, size_t n) {
     return dest;
 }
 
-/** 比较前 n 字节，返回第一个不等字节之差；FAT 里用来比文件名 */
 int memcmp(const void* s1, const void* s2, size_t n) {
     const unsigned char* a = s1;
     const unsigned char* b = s2;
@@ -32,7 +30,6 @@ int memcmp(const void* s1, const void* s2, size_t n) {
     return 0;
 }
 
-/** 字符串长度（不含 '\0'） */
 size_t strlen(const char* s) {
     size_t len = 0;
     while (*s++) len++;

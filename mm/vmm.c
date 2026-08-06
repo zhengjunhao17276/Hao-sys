@@ -19,39 +19,31 @@ static uint32_t* current_directory = NULL;
 static uint32_t kernel_page_directory[1024] __attribute__((aligned(4096)));
 
 /* 不再定义 kernel_first_page_table：旧代码里它是从未使用的静态数组，
- * 还被 vmm_destroy_directory 误当成"内核静态页表"比较（判据永不成立，
- * 共享页表会被错误释放）。vmm_init 的页表全由 PMM 动态分配，
- * 共享页表的保护应比较 kernel_page_directory[0]。 */
+ * vmm_destroy_directory 拿它当"内核静态页表"比较，判据永不成立，
+ * 共享页表会被错误释放。页表现在全由 PMM 动态分配。 */
 
 
-/** 逐字节清零，用来初始化新分配的页表/页目录 */
 static inline void zero_memory(void* ptr, size_t size) {
     unsigned char* p = (unsigned char*)ptr;
     while (size--) *p++ = 0;
 }
 
-/** 写表项：物理地址低 12 位清零，合并标志位，Presence 位强制置 1 */
 static inline void set_entry(uint32_t* entry, uint32_t phys_addr, uint32_t flags) {
     *entry = (phys_addr & 0xFFFFF000) | (flags & 0xFFF) | PAGE_PRESENT;
 }
 
-/** 清表项（= 不存在） */
 static inline void clear_entry(uint32_t* entry) {
     *entry = 0;
 }
 
-/** Present 位是否为 1 */
 static inline bool is_present(uint32_t entry) {
     return (entry & PAGE_PRESENT) != 0;
 }
 
-/** 虚拟地址 → 页目录索引（高 10 位） */
 static inline uint32_t pd_index(uint32_t virt) { return virt >> 22; }
 
-/** 虚拟地址 → 页表索引（中间 10 位） */
 static inline uint32_t pt_index(uint32_t virt) { return (virt >> 12) & 0x3FF; }
 
-/** 分配一页物理内存做页表并清零 */
 static uint32_t* allocate_pt(void) {
     uint32_t* pt = (uint32_t*)pmm_alloc_page();
     if (pt) {
@@ -60,16 +52,12 @@ static uint32_t* allocate_pt(void) {
     return pt;
 }
 
-/** 释放页表占用的物理页 */
 static void free_pt(uint32_t* pt) {
     if (pt) pmm_free_page((void*)pt);
 }
 
 
-/**
- * 初始化分页：清零内核页目录，按物理内存总量建页表做身份映射，
- * 写 CR3 并打开 CR0.PG 启用分页。
- */
+/* 初始化分页：身份映射全物理内存，写 CR3 并打开 CR0.PG */
 void vmm_init(void) {
     vga_write("[VMM] Initializing paging...\n");
 
@@ -133,7 +121,7 @@ void vmm_init(void) {
 }
 
 
-/** 创建用户进程的独立页目录，失败返回 NULL */
+/* 创建用户进程的独立页目录，失败返回 NULL */
 uint32_t* vmm_create_directory(void) {
     uint32_t* dir = (uint32_t*)pmm_alloc_page();
     if (!dir) return NULL;
@@ -152,7 +140,7 @@ uint32_t* vmm_create_directory(void) {
 }
 
 
-/** 销毁页目录：释放名下所有非内核页表，再释放页目录自身。
+/* 销毁页目录：释放名下所有非内核页表，再释放页目录自身。
  * 调用方须保证没有进程还在用这些页表。 */
 void vmm_destroy_directory(uint32_t* dir) {
     if (!dir) return;
@@ -187,7 +175,7 @@ void vmm_destroy_directory(uint32_t* dir) {
 }
 
 
-/** 建立 virt→phys 映射。页表不存在会自动分配；映射已存在则失败 */
+/* 建立 virt→phys 映射。页表不存在会自动分配；映射已存在则失败 */
 bool vmm_map_page(uint32_t* dir, uint32_t virt_addr, uint32_t phys_addr, uint32_t flags) {
     if (!dir) return false;
 
@@ -250,7 +238,7 @@ bool vmm_map_page(uint32_t* dir, uint32_t virt_addr, uint32_t phys_addr, uint32_
 }
 
 
-/** 解除映射（只清 PTE，物理页不还，调用方自己处理） */
+/* 解除映射（只清 PTE，物理页不还，调用方自己处理） */
 bool vmm_unmap_page(uint32_t* dir, uint32_t virt_addr) {
     if (!dir) return false;
 
@@ -272,7 +260,7 @@ bool vmm_unmap_page(uint32_t* dir, uint32_t virt_addr) {
 }
 
 
-/** 检查虚拟地址是否已映射且带 PAGE_USER（syscall 校验用户指针用） */
+/* 检查虚拟地址是否已映射且带 PAGE_USER（syscall 校验用户指针用） */
 bool vmm_is_user_accessible(uint32_t virt_addr) {
     if (!current_directory) return false;
 
@@ -289,7 +277,7 @@ bool vmm_is_user_accessible(uint32_t virt_addr) {
     return true;
 }
 
-/** 手动走一遍页表查物理地址（含页内偏移），未映射返回 0 */
+/* 手动走一遍页表查物理地址（含页内偏移），未映射返回 0 */
 uint32_t vmm_get_phys_addr(uint32_t* dir, uint32_t virt_addr) {
     if (!dir) return 0;
 
@@ -307,7 +295,7 @@ uint32_t vmm_get_phys_addr(uint32_t* dir, uint32_t virt_addr) {
 }
 
 
-/** 切换页目录（进程切换的关键步骤；写 CR3 自动刷整个 TLB） */
+/* 切换页目录（进程切换的关键步骤；写 CR3 自动刷整个 TLB） */
 void vmm_switch_directory(uint32_t* dir) {
     if (!dir) return;
     current_directory = dir;
@@ -315,7 +303,6 @@ void vmm_switch_directory(uint32_t* dir) {
 }
 
 
-/** 当前页目录指针 */
 uint32_t* vmm_get_current_directory(void) {
     return current_directory;
 }

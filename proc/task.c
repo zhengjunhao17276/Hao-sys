@@ -13,7 +13,6 @@
 #include <stdbool.h>
 #include <stddef.h>
 
-/* 内存清零辅助函数 */
 static inline void zero_memory(void* ptr, size_t size) {
     unsigned char* p = (unsigned char*)ptr;
     while (size--) *p++ = 0;
@@ -170,13 +169,11 @@ static void free_task(task_t* task) {
  * 做法：先挂入僵尸链表，等下次正常轮转切换前再统一回收。 */
 static task_t* zombie_list = NULL;
 
-/** 把已摘链的终止任务挂入僵尸链表（复用 next 字段） */
 static void free_task_later(task_t* task) {
     task->next = zombie_list;
     zombie_list = task;
 }
 
-/** 回收僵尸任务的内存（仅在当前任务栈安全时调用：正常轮转分支） */
 static void reap_zombies(void) {
     while (zombie_list) {
         task_t* z = zombie_list;
