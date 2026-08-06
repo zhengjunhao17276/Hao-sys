@@ -35,6 +35,7 @@
 #include "./include/driver/speaker.h"
 #include "./include/syscall/syscall.h"
 #include "./include/driver/rtc.h"
+#include "./include/driver/pit.h"
 #include "./include/mm/pmm.h"
 #include "./include/mm/vmm.h"
 #include "./include/proc/task.h"
@@ -68,6 +69,11 @@ bool kinit(uint32_t magic, uint32_t info_addr) {
     vga_write("[STEP 4] IDT/PIC init...\n");
     idt_init();
     pic_init();
+
+    /* PIT 定时器：抢占式调度时钟（100Hz，10ms/tick）。
+     * 需在 PIC 重映射（IRQ0→0x20）之后初始化，并取消 IRQ0 屏蔽。 */
+    pit_init(100);
+    pic_mask_irq(0, false);
 
     vga_write("[STEP 5] PCI scan...\n");
     pci_init();

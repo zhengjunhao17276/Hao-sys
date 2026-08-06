@@ -464,6 +464,19 @@ static void cmd_time(const char* args) { (void)args;
     putchar('\n');
 }
 
+/** cmd_busy - 用户态忙循环（验证抢占式调度）
+ *
+ * 纯用户态计算，不调用任何系统调用（避免进入内核态 IF=0 而
+ * 屏蔽 IRQ0）。运行期间每 30ms 应被 PIT 抢占切到 demo 任务，
+ * 屏幕会出现 demo tick——这就是抢占式的可视证据。 */
+static void cmd_busy(const char* args) { (void)args;
+    volatile unsigned int x = 0;
+    write("busy: computing in user mode...\n");
+    for (unsigned int i = 0; i < 30000000; i++) x += i;  /* ~1-2 秒 */
+    (void)x;
+    write("busy done.\n");
+}
+
 /** cmd_uptime - 显示开机时长（秒 → 天/时/分/秒） */
 static void cmd_uptime(const char* args) { (void)args;
     unsigned int s = (unsigned int)get_uptime();
@@ -818,6 +831,7 @@ static command_t commands[] = {
     { "mkdir", cmd_mkdir },
     { "ls",    cmd_ls },
     { "time",  cmd_time },
+    { "busy",  cmd_busy },
     { "uptime", cmd_uptime },
     { "settings", cmd_settings },
     { "set",   cmd_settings },

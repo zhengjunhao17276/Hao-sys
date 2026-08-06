@@ -111,13 +111,13 @@ switch_to_user:
     mov [eax], esp          ; prev->esp = 当前栈指针
 .skip_save:
 
-    ; 加载 next 的栈指针——指向其内核栈上的 iret 帧
-    ; ⚠️ 修复：约定 task->esp = iret 帧起点 - 4（中断入口在 push eax
-    ; 之后保存 esp，天然差 4 字节；task_create_user 也用占位字对齐）。
-    ; 这里必须 add esp,4 对准 EIP 槽，否则 iret 会把 EIP 弹成
-    ; 保存的 EAX（系统调用号）→ 跳飞。
+    ; 加载 next 的栈指针——指向其内核栈上的上下文帧：
+    ;   [pusha 帧 32B][iret 帧 20B]（task->esp 指向 pusha 帧顶部）
+    ; ⚠️ 修复：必须手动 pop 恢复通用寄存器再 iret！裸 iret 只恢复
+    ; EIP/CS/EFLAGS/ESP/SS——抢占发生在用户态代码中途时（如 putchar
+    ; 的 mov %al,-0x1(%ebp)），EAX/EBP 等全是内核残留值 → 用户态
+    ; 写垃圾地址 → #GP（实测抓到）。
     mov esp, [edx]
-    add esp, 4
 
     ; 设置用户数据段选择子（ring 3）
     mov ax, 0x23
@@ -126,7 +126,16 @@ switch_to_user:
     mov fs, ax
     mov gs, ax
 
-    ; iret 弹出：EIP, CS, EFLAGS, ESP, SS → 进入用户态
+    ; 恢复用户寄存器（popa 顺序：EDI, ESI, EBP, 跳过ESP, EBX, EDX, ECX, EAX）
+    pop edi
+    pop esi
+    pop ebp
+    add esp, 4
+    pop ebx
+    pop edx
+    pop ecx
+    pop eax
+    ; 现在 ESP = iret 帧起点 → 弹出 EIP/CS/EFLAGS/ESP/SS，进入 ring 3
     iret
 
 ; =============================================================================

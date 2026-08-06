@@ -57,6 +57,7 @@ typedef struct task_struct {
     /* ---- 任务属性 ---- */
     uint32_t pid;           /* 进程 ID */
     task_state_t state;     /* 当前状态 */
+    uint32_t ticks_used;    /* 抢占调度：当前时间片已用 tick 数 */
 
     /* ---- 内核栈（用于用户态中断处理） ---- */
     uint32_t kernel_esp0;   /* 用户态任务的中断会切换到内核栈，此字段存栈顶 */
@@ -79,6 +80,13 @@ typedef struct task_struct {
 } task_t;
 
 /* ---- 函数声明 ---- */
+
+/**
+ * current_task - 当前正在运行的任务
+ * 非 static（定义在 task.c）：中断入口（isr_asm.asm）和 PIT 调度器
+ * （pit.c）需要访问它。
+ */
+extern task_t* current_task;
 
 /**
  * task_init - 初始化进程管理子系统

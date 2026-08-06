@@ -21,6 +21,7 @@
 extern keyboard_irq_handler
 extern ps2_mouse_irq_handler
 extern pic_send_eoi
+extern pit_tick_handler
 extern syscall_dispatcher
 extern current_task
 
@@ -240,21 +241,29 @@ EXCEPTION 19, 0
 %macro IRQ 2
 global irq%1_handler
 irq%1_handler:
-    ; 保存当前用户任务的 esp（指向 CPU 压入的 iret 帧）。
-    ; 注意：刚 push eax，所以 esp = iret 帧起点 - 4，
-    ; 与 switch_to_user 的 add esp,4 约定一致（task->esp = EIP槽-4）。
-    ; 调度器切到其他任务后，切回时靠它恢复用户上下文。
-    ; 内核态（IF=0）不会触发 IRQ，所以这里一定是用户任务。
-    ; 注意：eax 是用户的寄存器，必须先 push 保护再使用！
-    push eax
+    ; ⚠️ 同 isr80_handler：先 pusha 再保存 task->esp（指向 pusha 帧，
+    ; iret 帧在正下方）。恢复时 switch_to_user 手动 pop + iret，
+    ; 通用寄存器不再丢失。
+    pusha
     mov eax, [current_task]
     test eax, eax
     jz %%nosave
     mov [eax], esp
-%%nosave:
-    pop eax
-    pusha
-    %if %1 == 1
+    %%nosave:
+    %if %1 == 0
+        ; pusha 后栈布局：内核态 CS@[esp+36]（=0x08），
+        ; 用户态 [esp+36] = 用户 ESP（栈地址，不会是 0x08）。
+        ; EOI 由 pit_tick_handler 内部发送（必须在 schedule 之前）。
+        cmp dword [esp+36], 0x08
+        je %%kernel_ctx
+        push dword 1
+        jmp %%call_tick
+    %%kernel_ctx:
+        push dword 0
+    %%call_tick:
+        call pit_tick_handler
+        add esp, 4
+    %elif %1 == 1
         ; IRQ1 = PS/2 键盘
         call keyboard_irq_handler
     %elif %1 == 12
@@ -346,19 +355,16 @@ isr_stub:
 ; =============================================================================
 global isr80_handler
 isr80_handler:
-    ; 保存当前用户任务的 esp（指向 CPU 压入的 iret 帧）。
-    ; 这样调度器切换到其他任务后，还能通过 switch_to_user 切回来。
-    ; 注意：刚 push eax，所以 esp = iret 帧起点 - 4，
-    ; 与 switch_to_user 的 add esp,4 约定一致（task->esp = EIP槽-4）。
-    ; ⚠️ eax 里是系统调用号，必须先 push 保护，用完再 pop 恢复！
-    push eax
+    ; ⚠️ 保存用户任务上下文：task->esp 指向 pusha 帧（iret 帧在其正下方）。
+    ; 恢复时（switch_to_user）手动 pop 寄存器后 iret——裸 iret 只恢复
+    ; EIP/CS/EFLAGS/ESP/SS，通用寄存器会丢失（实测：抢占发生在 putchar
+    ; 中途，EAX 里的字符被内核残留值覆盖 → 用户态写垃圾地址 → #GP）。
+    pusha                       ; push EAX, ECX, EDX, EBX, ESP, EBP, ESI, EDI
     mov eax, [current_task]
     test eax, eax
     jz .no_save
     mov [eax], esp
 .no_save:
-    pop eax
-    pusha                       ; push EAX, ECX, EDX, EBX, ESP, EBP, ESI, EDI
     push ds                     ; 保存数据段寄存器
     push es
     push fs
@@ -370,7 +376,7 @@ isr80_handler:
     pop fs
     pop es
     pop ds
-    ; 手动弹出 pusha 的寄存器（代替 popa，避免 ESP 跳过 IRET 帧）
+    ; 手动弹出 pusha 的寄存器（代替 popa，跳过 ESP 槽避免破坏栈指针）
     ; 当前 ESP = IRET_PTR - 32（指向 pusha 的 EDI）
     pop edi                     ; 弹出 EDI
     pop esi                     ; 弹出 ESI

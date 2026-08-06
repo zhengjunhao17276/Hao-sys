@@ -15,7 +15,7 @@ LDFLAGS  = -T linker.ld -m elf_i386
 
 OBJS = start.o isr_asm.o kmain.o vga.o pic.o keyboard.o mouse.o speaker.o \
        ata.o pci.o usb_controller.o usb_hid.o usb_mass_storage.o \
-       idt.o syscall.o pmm.o vmm.o task.o switch.o user_enter.o string.o fat.o rtc.o
+       idt.o syscall.o pmm.o vmm.o task.o switch.o user_enter.o string.o fat.o rtc.o pit.o
 
 SHELL_SRC  = user/shell.c
 SHELL_OBJ  = user/shell.o
@@ -97,6 +97,9 @@ fat.o: fs/fat.c
 	$(CC) $(CFLAGS) -c $< -o $@
 
 rtc.o: driver/rtc.c
+	$(CC) $(CFLAGS) -c $< -o $@
+
+pit.o: driver/pit.c
 	$(CC) $(CFLAGS) -c $< -o $@
 
 kernel.elf: $(OBJS)
