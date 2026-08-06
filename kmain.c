@@ -113,21 +113,32 @@ extern void switch_to_user(task_t* next);
 /* ==================== 多任务 yield 演示 ==================== */
 
 /**
- * demo_task_entry - 演示内核任务
+ * demo_task_entry - 演示内核任务（限次版）
  *
- * 循环打印 tick 并让出 CPU。用于演示协作式调度的完整切换路径：
- *   shell 执行命令后 yield → 切到 demo → demo 打印后 yield → 切回 shell
+ * 每 500ms 打印一行，共 12 行后 task_exit 退出——演示任务创建 →
+ * 调度 → 被抢占 → 终止 → 回收的完整生命周期，之后屏幕清净不再刷屏。
  * 删除本段及 load_and_run_shell 中的创建代码即可移除演示。
  */
 static void demo_task_entry(void) {
-    uint32_t tick = 0;
+    uint32_t last = 0;
+    uint32_t count = 0;
     vga_write("[demo] task started.\n");
-    while (1) {
-        vga_write("[demo] tick ");
-        vga_write_hex(++tick);
-        vga_write("\n");
-        yield();
+    while (count < 12) {
+        uint32_t now = pit_get_ticks();
+        if (now - last >= 50) {          /* 100Hz × 0.5s */
+            last = now;
+            vga_write("[demo] tick ");
+            vga_write_hex(++count);
+            vga_write("\n");
+        }
+        /* 开中断休眠：IRQ0（100Hz）唤醒后检查节拍。
+         * 显式 sti——内核任务可能以 IF=0 切入（IRQ0 调度上下文），
+         * 不 sti 则 hlt 永远不被唤醒。 */
+        __asm__ volatile ("sti; hlt");
     }
+    /* 演示完成：退出任务（走 task_exit → 终止 → 僵尸回收路径） */
+    task_exit();
+    while (1) __asm__ volatile ("hlt");   /* 不可达 */
 }
 
 /**
