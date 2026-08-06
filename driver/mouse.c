@@ -191,7 +191,7 @@ void mouse_feed_byte(uint8_t data) {
             ps2_acc_x += dx;
             ps2_acc_y += dy;
             mouse_x += ps2_acc_x / mouse_sensitivity;
-            mouse_y -= ps2_acc_y / mouse_sensitivity;
+            mouse_y += ps2_acc_y / mouse_sensitivity;  /* PS/2 dy 正值=向下，屏幕 row 向下增大 */
             ps2_acc_x %= mouse_sensitivity;
             ps2_acc_y %= mouse_sensitivity;
 
@@ -321,7 +321,7 @@ static void usb_process_report(uint8_t *data, int len) {
     ps2_acc_x += dx;
     ps2_acc_y += dy;
     mouse_x += ps2_acc_x / mouse_sensitivity;
-    mouse_y -= ps2_acc_y / mouse_sensitivity;
+    mouse_y += ps2_acc_y / mouse_sensitivity;  /* PS/2 dy 正值=向下，屏幕 row 向下增大 */
     ps2_acc_x %= mouse_sensitivity;
     ps2_acc_y %= mouse_sensitivity;
     if (mouse_x < 0) mouse_x = 0;
