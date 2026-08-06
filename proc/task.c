@@ -512,13 +512,30 @@ void schedule(void) {
             while (1) __asm__ volatile ("hlt");
         }
 
+        /* ⚠️ 修复：终止路径原来直接切到 current_task->next，
+         * 不检查就绪状态——shell 退出时会切到 RUNNING 态的 idle，
+         * 导致 READY 的 demo 饿死。这里改成优先找下一个就绪任务，
+         * 找不到才退回原选择（比如只剩 idle）。 */
+        {
+            task_t* pick = next_task;
+            int tries = 0;
+            while (pick->state != TASK_READY && tries < MAX_TASKS) {
+                pick = pick->next ? pick->next : task_list;
+                tries++;
+            }
+            if (pick->state == TASK_READY) next_task = pick;
+        }
+
         current_task = next_task;
         current_task->state = TASK_RUNNING;
 
-        if (current_task == idle_task) {
-            switch_to(NULL, current_task);        /* 切换到 idle（prev 已释放） */
+        /* ⚠️ 修复：这里原来用 current_task == idle_task 判断任务类型，
+         * 但 demo 这类内核任务不是 idle——被错误地走 switch_to_user，
+         * iret 从 pusha 帧弹垃圾 → #GP。统一用 is_user 判断。 */
+        if (!current_task->is_user) {
+            switch_to(NULL, current_task);        /* 内核任务（含 idle） */
         } else {
-            switch_to_user(NULL, current_task);   /* 切换到用户任务（prev 已释放） */
+            switch_to_user(NULL, current_task);   /* 用户任务 */
         }
         goto out;
     }

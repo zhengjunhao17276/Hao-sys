@@ -87,9 +87,13 @@ int sys_write(const char *str) {
  * 真正的 exit 应该由调度器从任务链表移除，此处简化了。
  */
 void sys_exit(int status) {
-    vga_write("[Syscall] System halt requested. Status: ");
+    vga_write("[Syscall] Task exiting, status: ");
     vga_write_hex((uint32_t)status);
     vga_write("\n");
+    /* ⚠️ 修复：之前直接 hlt 挂死整机。现在标记任务终止并交给
+     * 调度器清理（摘链表、释放 PCB/内核栈）、切换到下一个任务。 */
+    task_exit();
+    /* 理论不可达：task_exit 内部会切换走，不再返回 */
     while (1) __asm__ volatile ("hlt");
 }
 
