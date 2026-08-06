@@ -11,6 +11,7 @@
 #include "../include/driver/usb.h"
 #include "../include/mm/vmm.h"
 #include "../include/fs/fat.h"
+#include "../include/fs/vfs.h"
 #include "../include/proc/task.h"
 #include "../include/driver/rtc.h"
 #include <stdint.h>
@@ -135,7 +136,7 @@ static int sys_set_pglyph(uint32_t glyph) {
     return 0;
 }
 
-/* 写文件：校验文件名/数据都在用户页内后交给 FAT 驱动 */
+/* 写文件：校验文件名/数据都在用户页内后交给 VFS 路由到对应 FAT 实例 */
 static int sys_write_file(uint32_t filename, uint32_t data, uint32_t size) {
     if (!filename || !data) return -1;
     if (!vmm_is_user_accessible(filename)) return -1;
@@ -143,7 +144,10 @@ static int sys_write_file(uint32_t filename, uint32_t data, uint32_t size) {
     if (!vmm_is_user_accessible(data)) return -1;
     if (size > 0 && !vmm_is_user_accessible(data + size - 1)) return -1;
 
-    return fat_write_file((const char*)filename, (const void*)data, size) ? 0 : -1;
+    const char* sub;
+    fat_fs_t* fs = vfs_resolve((const char*)filename, &sub);
+    if (!fs) return -1;
+    return fat_write_file(fs, sub, (const void*)data, size) ? 0 : -1;
 }
 
 /* 读文件：文件名/缓冲都在用户页内；返回实际字节数 */
@@ -154,35 +158,47 @@ static int sys_read_file(uint32_t filename, uint32_t buf, uint32_t max_size) {
     if (!vmm_is_user_accessible(buf)) return -1;
     if (!vmm_is_user_accessible(buf + max_size - 1)) return -1;
 
+    const char* sub;
+    fat_fs_t* fs = vfs_resolve((const char*)filename, &sub);
+    if (!fs) return -1;
     fat_dirent_t entry;
-    if (!fat_find_file((const char*)filename, &entry)) return -1;
-    return (int)fat_load_file(&entry, (void*)buf, max_size);
+    if (!fat_find_file(fs, sub, &entry)) return -1;
+    return (int)fat_load_file(fs, &entry, (void*)buf, max_size);
 }
 
 /* 删除文件/空目录 */
 static int sys_delete_file(uint32_t filename) {
     if (!filename) return -1;
     if (!vmm_is_user_accessible(filename)) return -1;
-    return fat_delete_file((const char*)filename) ? 0 : -1;
+    const char* sub;
+    fat_fs_t* fs = vfs_resolve((const char*)filename, &sub);
+    if (!fs) return -1;
+    return fat_delete_file(fs, sub) ? 0 : -1;
 }
 
 /* 创建子目录 */
 static int sys_mkdir(uint32_t path) {
     if (!path) return -1;
     if (!vmm_is_user_accessible(path)) return -1;
-    return fat_mkdir((const char*)path) ? 0 : -1;
+    const char* sub;
+    fat_fs_t* fs = vfs_resolve((const char*)path, &sub);
+    if (!fs) return -1;
+    return fat_mkdir(fs, sub) ? 0 : -1;
 }
 
-/* 列目录：fat_dirent_t 数组写入用户缓冲 */
+/* 列目录：fat_dirent_t 数组写入用户缓冲（path 可为 NULL=根） */
 static int sys_list(uint32_t path, uint32_t buf, uint32_t max) {
     if (!buf || max == 0) return -1;
     if (path && !vmm_is_user_accessible(path)) return -1;
     if (!vmm_is_user_accessible(buf)) return -1;
     if (!vmm_is_user_accessible(buf + (max - 1) * 32)) return -1;
 
-    uint32_t dir_cluster = fat_open_dir(path ? (const char*)path : NULL);
+    const char* sub;
+    fat_fs_t* fs = vfs_resolve(path ? (const char*)path : NULL, &sub);
+    if (!fs) return -1;
+    uint32_t dir_cluster = fat_open_dir(fs, sub);
     if (dir_cluster == 0xFFFFFFFF) return -1;
-    return (int)fat_read_dir(dir_cluster, (fat_dirent_t*)buf, max);
+    return (int)fat_read_dir(fs, dir_cluster, (fat_dirent_t*)buf, max);
 }
 
 static int sys_tasks(void) {
@@ -231,6 +247,26 @@ static int sys_usb_info(void) {
     } else {
         vga_write("[USB MSC] not present\n");
     }
+    return 0;
+}
+
+/* 挂载设备（ebx=设备名, ecx=挂载点） */
+static int sys_mount(uint32_t dev_name, uint32_t point) {
+    if (!dev_name || !point) return -1;
+    if (!vmm_is_user_accessible(dev_name) || !vmm_is_user_accessible(point)) return -1;
+    return vfs_mount((const char*)point, (const char*)dev_name) ? 0 : -1;
+}
+
+/* 卸载（ebx=挂载点） */
+static int sys_umount(uint32_t point) {
+    if (!point) return -1;
+    if (!vmm_is_user_accessible(point)) return -1;
+    return vfs_umount((const char*)point) ? 0 : -1;
+}
+
+/* 打印设备/挂载表（内核态 vga 输出） */
+static int sys_devices(void) {
+    vfs_print_devices();
     return 0;
 }
 
@@ -363,6 +399,20 @@ void syscall_dispatcher(regs_t *regs) {
 
         case SYS_USB_INFO:
             ret = sys_usb_info();
+            break;
+
+        case SYS_MOUNT:
+            /* ebx = 设备名, ecx = 挂载点 */
+            ret = sys_mount(regs->ebx, regs->ecx);
+            break;
+
+        case SYS_UMOUNT:
+            /* ebx = 挂载点 */
+            ret = sys_umount(regs->ebx);
+            break;
+
+        case SYS_DEVICES:
+            ret = sys_devices();
             break;
 
         default:

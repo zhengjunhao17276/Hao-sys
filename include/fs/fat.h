@@ -10,6 +10,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include "../driver/block_dev.h"
 
 typedef enum {
     FAT_UNKNOWN = 0,  /* 未识别 */
@@ -74,34 +75,53 @@ typedef struct __attribute__((packed)) {
     uint32_t file_size;             /* 文件大小（字节），目录此项为 0 */
 } fat_dirent_t;
 
-/* 读 BPB 并识别 FAT 类型，成功返回 true */
-bool fat_init(void);
+/* fat_fs_t - FAT 实例：一个挂载的文件系统对应一份状态。
+ * sector_buffer/dir_scan_entries 不能共享（并发访问会互相踩踏）。 */
+typedef struct {
+    fat_bpb_t bpb;
+    const block_dev_t* dev;        /* 底层块设备 */
+    uint32_t first_data_sector;    /* 数据区起始 LBA */
+    uint32_t root_dir_sectors;     /* FAT12/16 根目录占用扇区数 */
+    uint32_t total_sectors;
+    uint32_t fat_size;             /* 每份 FAT 扇区数 */
+    uint32_t sectors_per_cluster;
+    uint32_t bytes_per_sector;
+    uint32_t root_dir_entries;
+    fat_type_t fs_type;
+    bool initialized;
+    uint32_t root_cluster;         /* FAT32 根目录起始簇 */
+    uint8_t sector_buffer[512];    /* 单扇区缓冲（每实例独立） */
+    fat_dirent_t dir_scan_entries[128];  /* 目录扫描缓冲（每实例独立） */
+} fat_fs_t;
+
+/* 挂载块设备：读 BPB 并识别 FAT 类型，成功返回 true */
+bool fat_mount(fat_fs_t* fs, const block_dev_t* dev);
 
 /* 返回检测到的 FAT 类型 */
-fat_type_t fat_get_type(void);
+fat_type_t fat_get_type(fat_fs_t* fs);
 
 /* 读根目录条目（FAT32 跟随根簇链，FAT12/16 读固定区），返回条目数 */
-uint32_t fat_read_root_dir(fat_dirent_t* entries, uint32_t max_entries);
+uint32_t fat_read_root_dir(fat_fs_t* fs, fat_dirent_t* entries, uint32_t max_entries);
 
 /* 按 8.3 名查找文件（大小写不敏感），找到填 out_entry 并返回 true */
-bool fat_find_file(const char* filename, fat_dirent_t* out_entry);
+bool fat_find_file(fat_fs_t* fs, const char* filename, fat_dirent_t* out_entry);
 
 /* 沿簇链读文件到 buffer，最多 max_size 字节；返回实际读到的字节数 */
-uint32_t fat_load_file(const fat_dirent_t* entry, void* buffer, uint32_t max_size);
+uint32_t fat_load_file(fat_fs_t* fs, const fat_dirent_t* entry, void* buffer, uint32_t max_size);
 
 /* 新建/覆盖文件，返回 true=成功 */
-bool fat_write_file(const char* filename, const void* data, uint32_t size);
+bool fat_write_file(fat_fs_t* fs, const char* filename, const void* data, uint32_t size);
 
 /* 删除文件或空目录，返回 true=成功 */
-bool fat_delete_file(const char* filename);
+bool fat_delete_file(fat_fs_t* fs, const char* filename);
 
 /* 创建子目录（支持多级路径），返回 true=成功 */
-bool fat_mkdir(const char* path);
+bool fat_mkdir(fat_fs_t* fs, const char* path);
 
 /* 读任意目录（0=根目录），返回条目数 */
-uint32_t fat_read_dir(uint32_t dir_cluster, fat_dirent_t* entries, uint32_t max_entries);
+uint32_t fat_read_dir(fat_fs_t* fs, uint32_t dir_cluster, fat_dirent_t* entries, uint32_t max_entries);
 
 /* 解析目录路径，返回目录首簇号（0=根）；失败返回 0xFFFFFFFF */
-uint32_t fat_open_dir(const char* path);
+uint32_t fat_open_dir(fat_fs_t* fs, const char* path);
 
 #endif

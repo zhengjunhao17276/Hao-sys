@@ -8,6 +8,7 @@
 #include "../include/driver/vga.h"
 #include "../include/driver/io.h"
 #include "../include/lib/string.h"
+#include "../include/fs/vfs.h"
 #include <stddef.h>
 #include <stdint.h>
 #include <stdbool.h>
@@ -226,6 +227,9 @@ bool usb_msc_present(void) {
     return msc_present;
 }
 
+/* usb0 块设备后端（MSC bulk 传输），定义在文件末尾 */
+static const block_dev_t usb_block_dev;
+
 /* 探测 MSC 设备：设配置 → TEST UNIT READY 重试 → INQUIRY/容量 */
 void usb_mass_storage_init(void) {
     vga_write("[USB MSC] Scanning for Mass Storage devices...\n");
@@ -312,5 +316,18 @@ void usb_mass_storage_init(void) {
         }
         dev = dev->next;
     }
+
+    /* usb0 注册到 VFS 并自动挂载到 /usb（根挂载 / 由 kmain 在 STEP 8 做） */
+    if (msc_present) {
+        vfs_register_device(&usb_block_dev);
+        vga_write("[USB MSC] usb0 registered, mounting /usb...\n");
+        if (!vfs_mount("/usb", "usb0")) vga_write("[USB MSC] mount /usb failed\n");
+    }
+
     vga_write("[USB MSC] Initialization complete.\n");
 }
+
+/* usb0 块设备后端（MSC bulk 传输） */
+static bool usb_blk_read(uint32_t lba, void* buf) { return usb_msc_read_sector(lba, buf) == 0; }
+static bool usb_blk_write(uint32_t lba, const void* buf) { return usb_msc_write_sector(lba, buf) == 0; }
+static const block_dev_t usb_block_dev = { "usb0", usb_blk_read, usb_blk_write, 0 };

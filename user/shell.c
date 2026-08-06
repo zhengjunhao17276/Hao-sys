@@ -30,6 +30,9 @@
 #define SYS_LIST       25  /* 列目录 */
 #define SYS_YIELD      26  /* 让出 CPU（协作式调度测试） */
 #define SYS_USB_INFO   27  /* 打印 USB 设备信息 */
+#define SYS_MOUNT      28  /* 挂载设备（ebx=设备名, ecx=挂载点） */
+#define SYS_UMOUNT     29  /* 卸载（ebx=挂载点） */
+#define SYS_DEVICES    30  /* 打印设备/挂载表 */
 
 /* FAT 目录项（与内核 fat_dirent_t 布局一致，32 字节） */
 struct dirent {
@@ -197,6 +200,25 @@ static int list_dir(const char* path, struct dirent* buf, unsigned int max) {
 /* tasks_sys - 打印任务列表（内核输出） */
 static void tasks_sys(void) {
     __asm__ volatile ("int $0x80" : : "a"(SYS_TASKS) : "memory");
+}
+
+/* mount_sys - 挂载设备（dev=设备名, point=挂载点） */
+static int mount_sys(const char* dev, const char* point) {
+    int r;
+    __asm__ volatile ("int $0x80" : "=a"(r) : "a"(SYS_MOUNT), "b"((unsigned int)dev), "c"((unsigned int)point) : "memory");
+    return r;
+}
+
+/* umount_sys - 卸载挂载点 */
+static int umount_sys(const char* point) {
+    int r;
+    __asm__ volatile ("int $0x80" : "=a"(r) : "a"(SYS_UMOUNT), "b"((unsigned int)point) : "memory");
+    return r;
+}
+
+/* devices_sys - 打印设备/挂载表（内核输出） */
+static void devices_sys(void) {
+    __asm__ volatile ("int $0x80" : : "a"(SYS_DEVICES) : "memory");
 }
 
 /* get_time - 读时间（(时<<16)|(分<<8)|秒） */
@@ -381,6 +403,9 @@ static void cmd_help(const char* args) { (void)args;
     write("  mkdir     - Create a directory\n");
     write("  ls        - List directory contents\n");
     write("  rm        - Delete a file\n");
+    write("  mount     - Mount a device (mount <device> <point>)\n");
+    write("  umount    - Unmount a filesystem (umount <point>)\n");
+    write("  devices   - List devices and mounts\n");
     write("  time      - Show date and time\n");
     write("  uptime    - Show time since boot\n");
     write("  settings  - Open settings TUI\n");
@@ -542,6 +567,57 @@ static void cmd_ls(const char* args) {
             write(" bytes\n");
         }
     }
+}
+
+/* cmd_mount - 挂载设备：两个空白分隔 token（设备名 + 挂载点） */
+static void cmd_mount(const char* args) {
+    char dev[16], point[32];
+    unsigned int i = 0;
+    while (args[i] && args[i] != ' ' && args[i] != '\t' && i < sizeof(dev) - 1) { dev[i] = args[i]; i++; }
+    dev[i] = '\0';
+    while (args[i] == ' ' || args[i] == '\t') i++;
+    unsigned int j = 0;
+    while (args[i] && args[i] != ' ' && args[i] != '\t' && j < sizeof(point) - 1) { point[j] = args[i]; i++; j++; }
+    point[j] = '\0';
+
+    if (dev[0] == '\0' || point[0] == '\0') {
+        write("Usage: mount <device> <mountpoint>\n");
+        return;
+    }
+    if (mount_sys(dev, point) == 0) {
+        write("Mounted ");
+        write(dev);
+        write(" on ");
+        write(point);
+        write("\n");
+    } else {
+        write("Mount failed (unknown device / bad filesystem).\n");
+    }
+}
+
+/* cmd_umount - 卸载挂载点 */
+static void cmd_umount(const char* args) {
+    char point[32];
+    unsigned int i = 0;
+    while (args[i] && args[i] != ' ' && args[i] != '\t' && i < sizeof(point) - 1) { point[i] = args[i]; i++; }
+    point[i] = '\0';
+
+    if (point[0] == '\0') {
+        write("Usage: umount <mountpoint>\n");
+        return;
+    }
+    if (umount_sys(point) == 0) {
+        write("Unmounted ");
+        write(point);
+        write("\n");
+    } else {
+        write("Unmount failed (not mounted).\n");
+    }
+}
+
+/* cmd_devices - 打印设备/挂载表 */
+static void cmd_devices(const char* args) { (void)args;
+    devices_sys();
 }
 
 /* cmd_rm - 删除文件 */
@@ -803,6 +879,9 @@ static command_t commands[] = {
     { "rm",    cmd_rm },
     { "mkdir", cmd_mkdir },
     { "ls",    cmd_ls },
+    { "mount", cmd_mount },
+    { "umount", cmd_umount },
+    { "devices", cmd_devices },
     { "time",  cmd_time },
     { "busy",  cmd_busy },
     { "uptime", cmd_uptime },

@@ -8,6 +8,7 @@
 #include <stdbool.h>
 
 #include "./include/driver/vga.h"
+#include "./include/driver/block_dev.h"
 #include "./include/syscall/idt.h"
 #include "./include/driver/pic.h"
 #include "./include/driver/keyboard.h"
@@ -23,7 +24,13 @@
 #include "./include/mm/vmm.h"
 #include "./include/proc/task.h"
 #include "./include/fs/fat.h"
+#include "./include/fs/vfs.h"
 #include "./include/lib/string.h"
+
+/* ata0 块设备后端 */
+static bool ata_blk_read(uint32_t lba, void* buf) { return ata_read_sector(lba, (uint8_t*)buf); }
+static bool ata_blk_write(uint32_t lba, const void* buf) { return ata_write_sector(lba, (const uint8_t*)buf); }
+static const block_dev_t ata_block_dev = { "ata0", ata_blk_read, ata_blk_write, 0 };
 
 /* @magic/info_addr 由 GRUB 传入；返回磁盘上是否有 FAT 文件系统。
  * 顺序依赖：PCI 扫描必须在 USB 之前（USB 控制器靠 PCI 发现）。 */
@@ -66,8 +73,8 @@ bool kinit(uint32_t magic, uint32_t info_addr) {
     bool fs_ready = false;
     if(ata_init(true)) {
         vga_write("[STEP 8b] FAT init...\n");
-        fs_ready = fat_init();
-
+        vfs_register_device(&ata_block_dev);
+        fs_ready = vfs_mount("/", "ata0");
     }
 
     vga_write("[STEP 9] Task init...\n");
@@ -94,9 +101,12 @@ static void load_and_run_shell(void) {
     vga_write("\n");
 
     /* 1. 搜索 SHELL.BIN */
-    /* fat_find_file 会把 "SHELL.BIN" 转成 8.3（"SHELL   BIN"）匹配 */
+    /* vfs_resolve 把 "/SHELL.BIN" 路由到根挂载（无其他前缀匹配时回退根），
+     * sub="SHELL.BIN"；fat_find_file 再把它转成 8.3（"SHELL   BIN"）匹配 */
     fat_dirent_t entry;
-    if (!fat_find_file("SHELL.BIN", &entry)) {
+    const char* sub = NULL;
+    fat_fs_t* root_fs = vfs_resolve("/SHELL.BIN", &sub);
+    if (!root_fs || !fat_find_file(root_fs, sub, &entry)) {
 	/* 找不到就直接返回 */
         vga_write("[Shell] SHELL.BIN not found.\n");
         return;
@@ -191,7 +201,7 @@ static void load_and_run_shell(void) {
         vmm_map_page(vmm_get_current_directory(), load_virt + pi * 4096, phys, PAGE_WRITE);
     }
 
-    uint32_t loaded = fat_load_file(&entry, (void*)load_virt, entry.file_size);
+    uint32_t loaded = fat_load_file(root_fs, &entry, (void*)load_virt, entry.file_size);
     for (uint32_t pi = 0; pi < code_pages; pi++) {
         vmm_unmap_page(vmm_get_current_directory(), load_virt + pi * 4096);
     }

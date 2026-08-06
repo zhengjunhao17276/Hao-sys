@@ -37,6 +37,9 @@
 #define SYS_LIST       25 /* 列目录（ebx=路径, ecx=目录项数组, edx=最大数） */
 #define SYS_YIELD      26 /* 让出 CPU（协作式调度；返回值不可用） */
 #define SYS_USB_INFO   27 /* 打印 USB 设备列表 + MSC 状态 */
+#define SYS_MOUNT      28 /* 挂载设备（ebx=设备名, ecx=挂载点） */
+#define SYS_UMOUNT     29 /* 卸载（ebx=挂载点） */
+#define SYS_DEVICES    30 /* 打印设备/挂载表 */
 
 /*
  * regs_t - 中断上下文（由 isr80_handler 压栈形成）
