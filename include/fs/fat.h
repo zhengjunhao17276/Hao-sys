@@ -80,6 +80,7 @@ typedef struct __attribute__((packed)) {
 typedef struct {
     fat_bpb_t bpb;
     const block_dev_t* dev;        /* 底层块设备 */
+    uint32_t base_lba;             /* 逻辑卷起始 LBA（直格=0，MBR 分区=分区起始） */
     uint32_t first_data_sector;    /* 数据区起始 LBA */
     uint32_t root_dir_sectors;     /* FAT12/16 根目录占用扇区数 */
     uint32_t total_sectors;

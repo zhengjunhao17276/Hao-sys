@@ -13,6 +13,14 @@
 #include <stdbool.h>
 #include "../include/driver/irqlock.h"
 
+/* 扇区读写统一加 base_lba 偏移（直格盘 base_lba=0 不受影响） */
+static bool fat_dev_read(fat_fs_t* fs, uint32_t lba, void* buf) {
+    return fs->dev->read_sector(fs->base_lba + lba, buf);
+}
+static bool fat_dev_write(fat_fs_t* fs, uint32_t lba, const void* buf) {
+    return fs->dev->write_sector(fs->base_lba + lba, buf);
+}
+
 /* FAT12 项 1.5 字节（奇偶簇取高/低 12 位）；FAT16 直接偏移；
  * FAT32 4 字节仅低 28 位有效 */
 static uint32_t read_fat_entry(fat_fs_t* fs, uint32_t cluster) {
@@ -24,13 +32,13 @@ static uint32_t read_fat_entry(fat_fs_t* fs, uint32_t cluster) {
          * 下一扇区 0），旧实现 *(uint16_t*)(sector_buffer+511) 越界读。 */
         uint8_t b0, b1;
         if (byte_off + 1 < fs->bytes_per_sector) {
-            if (!fs->dev->read_sector(fat_sector, fs->sector_buffer)) return 0x0FFFFFFF;
+            if (!fat_dev_read(fs, fat_sector, fs->sector_buffer)) return 0x0FFFFFFF;
             b0 = fs->sector_buffer[byte_off];
             b1 = fs->sector_buffer[byte_off + 1];
         } else {
-            if (!fs->dev->read_sector(fat_sector, fs->sector_buffer)) return 0x0FFFFFFF;
+            if (!fat_dev_read(fs, fat_sector, fs->sector_buffer)) return 0x0FFFFFFF;
             b0 = fs->sector_buffer[byte_off];
-            if (!fs->dev->read_sector(fat_sector + 1, fs->sector_buffer)) return 0x0FFFFFFF;
+            if (!fat_dev_read(fs, fat_sector + 1, fs->sector_buffer)) return 0x0FFFFFFF;
             b1 = fs->sector_buffer[0];
         }
         uint16_t val = (uint16_t)(b0 | (b1 << 8));
@@ -41,13 +49,13 @@ static uint32_t read_fat_entry(fat_fs_t* fs, uint32_t cluster) {
         uint32_t fat_offset = cluster * 2;
         uint32_t fat_sector = fs->bpb.reserved_sectors + fat_offset / fs->bytes_per_sector;
         uint32_t offset = fat_offset % fs->bytes_per_sector;
-        if (!fs->dev->read_sector(fat_sector, fs->sector_buffer)) return 0xFFFF;
+        if (!fat_dev_read(fs, fat_sector, fs->sector_buffer)) return 0xFFFF;
         return *(uint16_t*)(fs->sector_buffer + offset);
     } else if (fs->fs_type == FAT32) {
         uint32_t fat_offset = cluster * 4;
         uint32_t fat_sector = fs->bpb.reserved_sectors + fat_offset / fs->bytes_per_sector;
         uint32_t offset = fat_offset % fs->bytes_per_sector;
-        if (!fs->dev->read_sector(fat_sector, fs->sector_buffer)) return 0x0FFFFFFF;
+        if (!fat_dev_read(fs, fat_sector, fs->sector_buffer)) return 0x0FFFFFFF;
         return *(uint32_t*)(fs->sector_buffer + offset) & 0x0FFFFFFF;
     }
     return 0x0FFFFFFF;
@@ -82,13 +90,27 @@ static fat_type_t detect_fat_type(fat_fs_t* fs) {
     else return FAT32;
 }
 
-/* 读 BPB、验 0x55AA 签名、定 FAT 类型（字符串优先，数值推断兜底） */
-bool fat_mount(fat_fs_t* fs, const block_dev_t* dev) {
-    fs->dev = dev;
-    if (!fs->dev->read_sector(0, fs->sector_buffer)) {
-        vga_write("[FAT] Failed to read boot sector.\n");
-        return false;
+/* MBR 分区表：找第一个 FAT 分区（类型 01/04/06/0E/0B/0C），返回起始 LBA；
+ * 无 MBR 签名/无 FAT 分区返回 0。分区项在偏移 446，每项 16 字节，
+ * 类型字节在 +4，起始 LBA 在 +8（小端 32 位）。 */
+static uint32_t mbr_find_fat_partition(const uint8_t* mbr) {
+    if (mbr[510] != 0x55 || mbr[511] != 0xAA) return 0;
+    for (int i = 0; i < 4; i++) {
+        const uint8_t* e = mbr + 446 + i * 16;
+        uint8_t type = e[4];
+        if (type == 0x00 || type == 0x05 || type == 0x0F) continue;  /* 空槽/扩展分区 */
+        if (type == 0x01 || type == 0x04 || type == 0x06 || type == 0x0E ||
+            type == 0x0B || type == 0x0C) {
+            return (uint32_t)e[8] | ((uint32_t)e[9] << 8) |
+                   ((uint32_t)e[10] << 16) | ((uint32_t)e[11] << 24);
+        }
     }
+    return 0;
+}
+
+/* 校验 sector_buffer 中的 BPB 并填派生字段（fat_mount 对直格盘和 MBR
+ * 分区盘各调一次，sector_buffer 须已含待校验的引导扇区） */
+static bool fat_bpb_load(fat_fs_t* fs) {
     fat_bpb_t* b = (fat_bpb_t*)fs->sector_buffer;
     fs->bpb = *b;
 
@@ -156,6 +178,32 @@ bool fat_mount(fat_fs_t* fs, const block_dev_t* dev) {
     return true;
 }
 
+/* 挂载：先试直格盘（LBA 0 = FAT BPB），失败则解析 MBR 分区表，
+ * 从 FAT 分区起始 LBA 挂载（base_lba 偏移）。 */
+bool fat_mount(fat_fs_t* fs, const block_dev_t* dev) {
+    fs->dev = dev;
+    fs->base_lba = 0;
+
+    /* 尝试 1：直格盘（LBA 0 = FAT BPB） */
+    if (!fat_dev_read(fs, 0, fs->sector_buffer)) {
+        vga_write("[FAT] Failed to read boot sector.\n");
+        return false;
+    }
+    if (fat_bpb_load(fs)) return true;
+
+    /* 尝试 2：MBR 分区盘（LBA 0 = MBR，FAT 在分区起始） */
+    uint32_t part_lba = mbr_find_fat_partition(fs->sector_buffer);
+    if (part_lba != 0) {
+        fs->base_lba = part_lba;
+        if (fat_dev_read(fs, 0, fs->sector_buffer) && fat_bpb_load(fs)) return true;
+    }
+
+    vga_write("[FAT] No FAT filesystem (raw or MBR) on '");
+    vga_write(fs->dev->name);
+    vga_write("'\n");
+    return false;
+}
+
 fat_type_t fat_get_type(fat_fs_t* fs) {
     uint32_t fl = irq_lock();
     fat_type_t t = fs->fs_type;
@@ -207,7 +255,7 @@ uint32_t fat_read_dir(fat_fs_t* fs, uint32_t dir_cluster, fat_dirent_t* entries,
         }
 
         for (uint32_t s = 0; s < sector_count; s++) {
-            if (!fs->dev->read_sector(lba + s, fs->sector_buffer)) break;
+            if (!fat_dev_read(fs, lba + s, fs->sector_buffer)) break;
             fat_dirent_t* dirent = (fat_dirent_t*)fs->sector_buffer;
             uint32_t per_sector = fs->bytes_per_sector / 32;
             for (uint32_t i = 0; i < per_sector && index < max_entries; i++) {
@@ -266,7 +314,7 @@ static int dir_find_slot(fat_fs_t* fs, uint32_t dir_cluster, const char* name_83
         }
 
         for (uint32_t s = 0; s < sector_count; s++) {
-            if (!fs->dev->read_sector(lba + s, fs->sector_buffer)) return 0;
+            if (!fat_dev_read(fs, lba + s, fs->sector_buffer)) return 0;
             fat_dirent_t* d = (fat_dirent_t*)fs->sector_buffer;
             for (uint32_t i = 0; i < fs->bytes_per_sector / 32; i++) {
                 if (d[i].name[0] == 0x00 || (uint8_t)d[i].name[0] == 0xE5) {
@@ -297,20 +345,20 @@ static void write_fat_entry(fat_fs_t* fs, uint32_t cluster, uint32_t value) {
         fat_offset = cluster * 2;
         fat_sector = fs->bpb.reserved_sectors + fat_offset / fs->bytes_per_sector;
         offset = fat_offset % fs->bytes_per_sector;
-        if (!fs->dev->read_sector(fat_sector, fs->sector_buffer)) return;
+        if (!fat_dev_read(fs, fat_sector, fs->sector_buffer)) return;
         *(uint16_t*)(fs->sector_buffer + offset) = (uint16_t)(value & 0xFFFF);
-        fs->dev->write_sector(fat_sector, fs->sector_buffer);
-        fs->dev->write_sector(fat_sector + fs->fat_size, fs->sector_buffer);   /* 镜像 FAT2 */
+        fat_dev_write(fs, fat_sector, fs->sector_buffer);
+        fat_dev_write(fs, fat_sector + fs->fat_size, fs->sector_buffer);   /* 镜像 FAT2 */
 
     } else if (fs->fs_type == FAT32) {
         fat_offset = cluster * 4;
         fat_sector = fs->bpb.reserved_sectors + fat_offset / fs->bytes_per_sector;
         offset = fat_offset % fs->bytes_per_sector;
-        if (!fs->dev->read_sector(fat_sector, fs->sector_buffer)) return;
+        if (!fat_dev_read(fs, fat_sector, fs->sector_buffer)) return;
         *(uint32_t*)(fs->sector_buffer + offset) =
             (*(uint32_t*)(fs->sector_buffer + offset) & 0xF0000000) | (value & 0x0FFFFFFF);
-        fs->dev->write_sector(fat_sector, fs->sector_buffer);
-        fs->dev->write_sector(fat_sector + fs->fat_size, fs->sector_buffer);
+        fat_dev_write(fs, fat_sector, fs->sector_buffer);
+        fat_dev_write(fs, fat_sector + fs->fat_size, fs->sector_buffer);
 
     } else if (fs->fs_type == FAT12) {
         fat_offset = cluster * 3 / 2;
@@ -320,14 +368,14 @@ static void write_fat_entry(fat_fs_t* fs, uint32_t cluster, uint32_t value) {
          * 旧实现 *(uint16_t*)(sector_buffer+511) 越界写。 */
         uint8_t b0, b1, old_lo = 0, old_hi = 0;
         if (offset + 1 < fs->bytes_per_sector) {
-            if (!fs->dev->read_sector(fat_sector, fs->sector_buffer)) return;
+            if (!fat_dev_read(fs, fat_sector, fs->sector_buffer)) return;
             b0 = fs->sector_buffer[offset];
             b1 = fs->sector_buffer[offset + 1];
         } else {
-            if (!fs->dev->read_sector(fat_sector, fs->sector_buffer)) return;
+            if (!fat_dev_read(fs, fat_sector, fs->sector_buffer)) return;
             b0 = fs->sector_buffer[offset];
             old_hi = fs->sector_buffer[offset + 1];   /* 越界值丢弃（下一扇区头） */
-            if (!fs->dev->read_sector(fat_sector + 1, fs->sector_buffer)) return;
+            if (!fat_dev_read(fs, fat_sector + 1, fs->sector_buffer)) return;
             b1 = fs->sector_buffer[0];
             old_lo = fs->sector_buffer[1];
         }
@@ -339,18 +387,18 @@ static void write_fat_entry(fat_fs_t* fs, uint32_t cluster, uint32_t value) {
         if (offset + 1 < fs->bytes_per_sector) {
             fs->sector_buffer[offset]     = (uint8_t)(v & 0xFF);
             fs->sector_buffer[offset + 1] = (uint8_t)((v >> 8) & 0xFF);
-            fs->dev->write_sector(fat_sector, fs->sector_buffer);
-            fs->dev->write_sector(fat_sector + fs->fat_size, fs->sector_buffer);
+            fat_dev_write(fs, fat_sector, fs->sector_buffer);
+            fat_dev_write(fs, fat_sector + fs->fat_size, fs->sector_buffer);
         } else {
             /* 跨扇区：低字节写本扇区尾，高字节写下一扇区头 */
             fs->sector_buffer[offset] = (uint8_t)(v & 0xFF);
-            fs->dev->write_sector(fat_sector, fs->sector_buffer);
-            fs->dev->write_sector(fat_sector + fs->fat_size, fs->sector_buffer);
-            if (!fs->dev->read_sector(fat_sector + 1, fs->sector_buffer)) return;
+            fat_dev_write(fs, fat_sector, fs->sector_buffer);
+            fat_dev_write(fs, fat_sector + fs->fat_size, fs->sector_buffer);
+            if (!fat_dev_read(fs, fat_sector + 1, fs->sector_buffer)) return;
             fs->sector_buffer[0] = (uint8_t)((v >> 8) & 0xFF);
             (void)old_lo; (void)old_hi;
-            fs->dev->write_sector(fat_sector + 1, fs->sector_buffer);
-            fs->dev->write_sector(fat_sector + 1 + fs->fat_size, fs->sector_buffer);
+            fat_dev_write(fs, fat_sector + 1, fs->sector_buffer);
+            fat_dev_write(fs, fat_sector + 1 + fs->fat_size, fs->sector_buffer);
         }
     }
 }
@@ -377,7 +425,7 @@ static bool dir_extend(fat_fs_t* fs, uint32_t dir_cluster, uint32_t* new_lba) {
             uint32_t lba = fs->first_data_sector + (c - 2) * fs->sectors_per_cluster;
             for (uint32_t s = 0; s < fs->sectors_per_cluster; s++) {
                 memset(fs->sector_buffer, 0, fs->bytes_per_sector);
-                fs->dev->write_sector(lba + s, fs->sector_buffer);
+                fat_dev_write(fs, lba + s, fs->sector_buffer);
             }
             *new_lba = lba;
             return true;
@@ -510,7 +558,7 @@ uint32_t fat_load_file(fat_fs_t* fs, const fat_dirent_t* entry, void* buffer, ui
     while (remaining > 0 && cluster < 0x0FFFFFF8) {
         uint32_t lba = fs->first_data_sector + (cluster - 2) * fs->sectors_per_cluster;
         for (uint32_t s = 0; s < fs->sectors_per_cluster && remaining > 0; s++) {
-            if (!fs->dev->read_sector(lba + s, fs->sector_buffer)) {
+            if (!fat_dev_read(fs, lba + s, fs->sector_buffer)) {
                 irq_unlock(fl);
                 return file_size - remaining;
             }
@@ -553,7 +601,7 @@ bool fat_delete_file(fat_fs_t* fs, const char* filename) {
     int slot = dir_find_slot(fs, parent, name_83, &lba, &offset);
     if (slot != 1) return false;
 
-    if (!fs->dev->read_sector(lba, fs->sector_buffer)) return false;
+    if (!fat_dev_read(fs, lba, fs->sector_buffer)) return false;
     fat_dirent_t* e = (fat_dirent_t*)(fs->sector_buffer + offset);
 
     /* 先拷出需要的数据——sector_buffer 会被后续调用污染 */
@@ -571,10 +619,10 @@ bool fat_delete_file(fat_fs_t* fs, const char* filename) {
     }
 
     /* 重新读目录项所在扇区（sector_buffer 可能已被 fat_read_dir 污染） */
-    if (!fs->dev->read_sector(lba, fs->sector_buffer)) return false;
+    if (!fat_dev_read(fs, lba, fs->sector_buffer)) return false;
     e = (fat_dirent_t*)(fs->sector_buffer + offset);
     e->name[0] = 0xE5;   /* 标记已删除 */
-    if (!fs->dev->write_sector(lba, fs->sector_buffer)) return false;
+    if (!fat_dev_write(fs, lba, fs->sector_buffer)) return false;
     if (first_cluster >= 2) fat_free_chain(fs, first_cluster);
     return true;
 }
@@ -607,7 +655,7 @@ static bool fat_write_file_impl(fat_fs_t* fs, const char* filename, const void* 
         entry_sector = new_lba;
         entry_offset = 0;
     } else if (slot == 1) {
-        if (!fs->dev->read_sector(entry_sector, fs->sector_buffer)) return false;
+        if (!fat_dev_read(fs, entry_sector, fs->sector_buffer)) return false;
         fat_dirent_t* e = (fat_dirent_t*)(fs->sector_buffer + entry_offset);
         if (e->attributes & 0x10) return false;   /* 不能覆盖目录 */
         old_first_cluster = (e->cluster_high << 16) | e->cluster_low;
@@ -646,7 +694,7 @@ static bool fat_write_file_impl(fat_fs_t* fs, const char* filename, const void* 
             memset(fs->sector_buffer, 0, fs->bytes_per_sector);
             uint32_t copy = (remaining < fs->bytes_per_sector) ? remaining : fs->bytes_per_sector;
             memcpy(fs->sector_buffer, src, copy);
-            if (!fs->dev->write_sector(lba + s, fs->sector_buffer)) {
+            if (!fat_dev_write(fs, lba + s, fs->sector_buffer)) {
                 /* ⚠️ 写扇区失败时释放已分配的簇链，避免磁盘空间永久泄漏 */
                 fat_free_chain(fs, first_cluster);
                 return false;
@@ -660,7 +708,7 @@ static bool fat_write_file_impl(fat_fs_t* fs, const char* filename, const void* 
     }
 
     /* 填充目录项并写回 */
-    if (!fs->dev->read_sector(entry_sector, fs->sector_buffer)) return false;
+    if (!fat_dev_read(fs, entry_sector, fs->sector_buffer)) return false;
     fat_dirent_t* e = (fat_dirent_t*)(fs->sector_buffer + entry_offset);
     for (int i = 0; i < 11; i++) e->name[i] = (uint8_t)name_83[i];
     e->attributes = 0x20;                  /* 归档属性 */
@@ -674,7 +722,7 @@ static bool fat_write_file_impl(fat_fs_t* fs, const char* filename, const void* 
     e->last_write_date = 0;
     e->cluster_low = (uint16_t)(first_cluster & 0xFFFF);
     e->file_size = size;
-    if (!fs->dev->write_sector(entry_sector, fs->sector_buffer)) return false;
+    if (!fat_dev_write(fs, entry_sector, fs->sector_buffer)) return false;
 
     return true;
 }
@@ -712,7 +760,7 @@ static bool fat_mkdir_impl(fat_fs_t* fs, const char* path) {
     uint32_t lba = fs->first_data_sector + (new_cluster - 2) * fs->sectors_per_cluster;
     for (uint32_t s = 0; s < fs->sectors_per_cluster; s++) {
         memset(fs->sector_buffer, 0, fs->bytes_per_sector);
-        fs->dev->write_sector(lba + s, fs->sector_buffer);
+        fat_dev_write(fs, lba + s, fs->sector_buffer);
     }
 
     /* 写 '.' 和 '..' */
@@ -732,10 +780,10 @@ static bool fat_mkdir_impl(fat_fs_t* fs, const char* path) {
     dotdot.cluster_high = (uint16_t)((parent_cluster >> 16) & 0xFFFF);
 
     /* ⚠️ 以下各失败点统一释放 new_cluster，避免泄漏 */
-    if (!fs->dev->read_sector(lba, fs->sector_buffer)) { fat_free_chain(fs, new_cluster); return false; }
+    if (!fat_dev_read(fs, lba, fs->sector_buffer)) { fat_free_chain(fs, new_cluster); return false; }
     memcpy(fs->sector_buffer, &dot, sizeof(dot));
     memcpy(fs->sector_buffer + 32, &dotdot, sizeof(dotdot));
-    if (!fs->dev->write_sector(lba, fs->sector_buffer)) { fat_free_chain(fs, new_cluster); return false; }
+    if (!fat_dev_write(fs, lba, fs->sector_buffer)) { fat_free_chain(fs, new_cluster); return false; }
 
     /* 在父目录写新目录项（满则扩展） */
     uint32_t entry_sector, entry_offset;
@@ -751,7 +799,7 @@ static bool fat_mkdir_impl(fat_fs_t* fs, const char* path) {
         return false;
     }
 
-    if (!fs->dev->read_sector(entry_sector, fs->sector_buffer)) { fat_free_chain(fs, new_cluster); return false; }
+    if (!fat_dev_read(fs, entry_sector, fs->sector_buffer)) { fat_free_chain(fs, new_cluster); return false; }
     fat_dirent_t* e = (fat_dirent_t*)(fs->sector_buffer + entry_offset);
     for (int i = 0; i < 11; i++) e->name[i] = (uint8_t)name_83[i];
     e->attributes = 0x10;                  /* 目录属性 */
@@ -765,7 +813,7 @@ static bool fat_mkdir_impl(fat_fs_t* fs, const char* path) {
     e->last_write_date = 0;
     e->cluster_low = (uint16_t)(new_cluster & 0xFFFF);
     e->file_size = 0;                      /* 目录大小为 0 */
-    if (!fs->dev->write_sector(entry_sector, fs->sector_buffer)) { fat_free_chain(fs, new_cluster); return false; }
+    if (!fat_dev_write(fs, entry_sector, fs->sector_buffer)) { fat_free_chain(fs, new_cluster); return false; }
 
     return true;
 }

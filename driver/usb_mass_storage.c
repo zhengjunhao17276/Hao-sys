@@ -99,50 +99,67 @@ static bool find_msc_interface(usb_hc_t *hc, uint8_t dev_addr,
     return false;
 }
 
-/* 执行一次 BOT 命令，校验 CSW 签名/tag/状态 */
+/* BOT 协议失败恢复（规范 §5.3）：Mass Storage Reset 类请求 + 清两个
+ * 批量端点 HALT，之后设备回到可收新 CBW 的状态 */
+static void msc_bot_reset(void) {
+    usb_control_transfer(msc_hc, msc_addr, 0x21, 0xFF, 0, 0, NULL, 0);  /* 0x21=主机→接口类, 0xFF=Reset */
+    usb_control_transfer(msc_hc, msc_addr, 0x02, 0x01, 0, msc_ep_out, NULL, 0);  /* 清 OUT 端点 HALT */
+    usb_control_transfer(msc_hc, msc_addr, 0x82, 0x01, 0, msc_ep_in, NULL, 0);   /* 清 IN 端点 HALT */
+    volatile uint32_t s = 0;
+    for (uint32_t j = 0; j < 2000000; j++) s++;
+    (void)s;
+}
+
+/* 执行一次 BOT 命令，校验 CSW 签名/tag/状态；失败自动恢复并重试 */
 static int msc_bot_command(const uint8_t *cb, uint8_t cb_len,
                            uint8_t dir, void *data, uint32_t data_len) {
     if (!msc_present) return -1;
 
-    msc_cbw_t cbw;
-    msc_csw_t csw;
-    memset(&cbw, 0, sizeof(cbw));
-    cbw.dCBWSignature = 0x43425355;
-    uint32_t sent_tag = msc_cbw_tag++;
-    cbw.dCBWTag = sent_tag;
-    cbw.dCBWDataTransferLength = data_len;
-    cbw.bmCBWFlags = dir ? 0x80 : 0x00;
-    cbw.bCBWLUN = 0;
-    cbw.bCBWCBLength = cb_len;
-    memcpy(cbw.CB, cb, cb_len);
+    for (int attempt = 0; attempt < 3; attempt++) {
+        msc_cbw_t cbw;
+        msc_csw_t csw;
+        memset(&cbw, 0, sizeof(cbw));
+        cbw.dCBWSignature = 0x43425355;
+        uint32_t sent_tag = msc_cbw_tag++;
+        cbw.dCBWTag = sent_tag;
+        cbw.dCBWDataTransferLength = data_len;
+        cbw.bmCBWFlags = dir ? 0x80 : 0x00;
+        cbw.bCBWLUN = 0;
+        cbw.bCBWCBLength = cb_len;
+        memcpy(cbw.CB, cb, cb_len);
 
-    int ret = usb_bulk_bot(msc_hc, msc_addr, msc_ep_out, msc_ep_in,
-                           &cbw, sizeof(cbw),
-                           data, data_len, dir,
-                           &csw, sizeof(csw));
-    if (ret != 0) {
-        vga_write("[USB MSC] BOT transfer failed.\n");
-        return -1;
+        int ret = usb_bulk_bot(msc_hc, msc_addr, msc_ep_out, msc_ep_in,
+                               &cbw, sizeof(cbw),
+                               data, data_len, dir,
+                               &csw, sizeof(csw));
+        if (ret == 0) {
+            /* ⚠️ usb_bulk_bot 只等 CBW TD（ACTIVE 清位），链尾 DATA/CSW TD
+             * 由控制器随后处理。快 vCPU 下不等 CSW 就返回，下一命令的 CBW
+             * 会撞上设备还在 DATAOUT/CSW 态——QEMU usb-msd 直接 STALL
+             * （真实设备是 NAK+重试，无此问题）。CSW 缓冲由设备异步填写
+             * （与 TD 状态回写无关），轮询签名+tag 即可等到设备回 CBW 态。 */
+            for (int i = 0; i < 200; i++) {
+                if (csw.dCSWSignature == 0x53425355 && csw.dCSWTag == sent_tag) break;
+                volatile uint32_t s = 0;
+                for (uint32_t j = 0; j < 1000000; j++) s++;
+                (void)s;
+            }
+            if (csw.dCSWSignature == 0x53425355 && csw.dCSWTag == sent_tag) {
+                if (csw.bCSWStatus != 0) {
+                    vga_write("[USB MSC] Command failed (status=");
+                    vga_write_hex(csw.bCSWStatus);
+                    vga_write(").\n");
+                    return -1;
+                }
+                return 0;
+            }
+            vga_write("[USB MSC] CSW timeout, resetting...\n");
+        } else {
+            vga_write("[USB MSC] BOT transfer failed, resetting...\n");
+        }
+        msc_bot_reset();
     }
-    if (csw.dCSWSignature != 0x53425355) {
-        vga_write("[USB MSC] Bad CSW signature.\n");
-        return -1;
-    }
-    if (csw.dCSWTag != sent_tag) {
-        vga_write("[USB MSC] CSW tag mismatch (");
-        vga_write_hex(csw.dCSWTag);
-        vga_write(" vs ");
-        vga_write_hex(sent_tag);
-        vga_write(").\n");
-        return -1;
-    }
-    if (csw.bCSWStatus != 0) {
-        vga_write("[USB MSC] Command failed (status=");
-        vga_write_hex(csw.bCSWStatus);
-        vga_write(").\n");
-        return -1;
-    }
-    return 0;
+    return -1;
 }
 
 /* TEST UNIT READY：查设备是否就绪（无数据阶段） */
@@ -227,8 +244,8 @@ bool usb_msc_present(void) {
     return msc_present;
 }
 
-/* usb0 块设备后端（MSC bulk 传输），定义在文件末尾 */
-static const block_dev_t usb_block_dev;
+/* usb0 块设备后端（MSC bulk 传输），定义在文件末尾；sector_count 在探测后更新 */
+static block_dev_t usb_block_dev;
 
 /* 探测 MSC 设备：设配置 → TEST UNIT READY 重试 → INQUIRY/容量 */
 void usb_mass_storage_init(void) {
@@ -319,6 +336,7 @@ void usb_mass_storage_init(void) {
 
     /* usb0 注册到 VFS 并自动挂载到 /usb（根挂载 / 由 kmain 在 STEP 8 做） */
     if (msc_present) {
+        usb_block_dev.sector_count = msc_sector_count;
         vfs_register_device(&usb_block_dev);
         vga_write("[USB MSC] usb0 registered, mounting /usb...\n");
         if (!vfs_mount("/usb", "usb0")) vga_write("[USB MSC] mount /usb failed\n");
@@ -330,4 +348,4 @@ void usb_mass_storage_init(void) {
 /* usb0 块设备后端（MSC bulk 传输） */
 static bool usb_blk_read(uint32_t lba, void* buf) { return usb_msc_read_sector(lba, buf) == 0; }
 static bool usb_blk_write(uint32_t lba, const void* buf) { return usb_msc_write_sector(lba, buf) == 0; }
-static const block_dev_t usb_block_dev = { "usb0", usb_blk_read, usb_blk_write, 0 };
+static block_dev_t usb_block_dev = { "usb0", usb_blk_read, usb_blk_write, 0 };
