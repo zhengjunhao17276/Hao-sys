@@ -136,32 +136,6 @@ run: kernel.elf $(DISK_IMG)
 run-atthisconsole: kernel.elf $(DISK_IMG)
 	qemu-system-i386 -kernel kernel.elf -hda "$(CURDIR)/$(DISK_IMG)" -display curses
 
-# ---------- USB 测试 ----------
-# 标准 USB 全链路（QEMU 虚拟设备：UHCI + usb-kbd + 虚拟 hub + usb-storage）
-run-usb: kernel.elf $(DISK_IMG)
-	qemu-system-i386 -kernel kernel.elf -hda "$(CURDIR)/$(DISK_IMG)" \
-		-usb -device usb-kbd \
-		-drive if=none,id=usbdisk,file=$(CURDIR)/usb.img,format=raw \
-		-device usb-storage,drive=usbdisk \
-		-display curses -monitor none -no-reboot
-
-# USB 直通测试：把宿主机的真实 USB 设备直通给内核（真机验证途径）
-# 用法：
-#   sudo make run-usb-host USB_HOST="vendorid=0x1234,productid=0x5678"   # 按 VID/PID
-#   sudo make run-usb-host USB_HOST="hostbus=1,hostaddr=3"               # 按总线/端口
-# 先运行 lsusb 查看设备 ID；直通需 root（访问 /dev/bus/usb）
-run-usb-host: kernel.elf $(DISK_IMG)
-	@if [ -z "$(USB_HOST)" ]; then \
-		echo "用法: sudo make run-usb-host USB_HOST=\"vendorid=0x1234,productid=0x5678\""; \
-		echo "先运行 lsusb 查看设备 ID；USB_HOST 也可用 hostbus=N,hostaddr=M"; \
-		exit 1; \
-	fi
-	qemu-system-i386 -kernel kernel.elf -hda "$(CURDIR)/$(DISK_IMG)" \
-		-usb -device usb-host,$(USB_HOST) \
-		-drive if=none,id=usbdisk,file=$(CURDIR)/usb.img,format=raw \
-		-device usb-storage,drive=usbdisk \
-		-display curses -monitor none -no-reboot
-
 # ---------- 清理 ----------
 clean:
 	rm -f *.o *.elf *.bin
