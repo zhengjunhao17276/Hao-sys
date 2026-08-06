@@ -109,12 +109,6 @@ static int pointer_row = 0, pointer_col = 0;
 /** 指针下方的原始字符+属性（移动时恢复） */
 static uint16_t pointer_under = 0x0F20;
 /** 上一包的按钮状态（用于检测按下沿 = 点击） */
-static uint8_t prev_btn = 0;
-
-/** 属性反转：交换前景/背景 nibble（反显效果） */
-static uint8_t invert_attr(uint8_t attr) {
-    return (uint8_t)(((attr & 0x0F) << 4) | ((attr >> 4) & 0x0F));
-}
 
 /**
  * MOUSE_POINTER_GLYPH_DEFAULT - 默认鼠标指针图案（CP437 字形）
@@ -144,24 +138,7 @@ void mouse_pointer_erase(void) {
     irq_unlock(fl);
 }
 
-/** pointer_draw - 在指定位置绘制鼠标指针（固定图案 + 反显属性） */
-static void pointer_draw(int row, int col) {
-    uint32_t fl = irq_lock();
-    /* 先恢复旧位置 */
-    if (pointer_active) {
-        VGA_ADDR[pointer_row * VGA_WIDTH + pointer_col] = pointer_under;
-    }
-    pointer_row = row;
-    pointer_col = col;
 
-    uint32_t idx = row * VGA_WIDTH + col;
-    pointer_under = VGA_ADDR[idx];
-    uint8_t attr = (pointer_under >> 8) & 0xFF;
-    /* 用可配置图案渲染指针（默认实心方块） */
-    VGA_ADDR[idx] = ((uint16_t)invert_attr(attr) << 8) | pointer_glyph;
-    pointer_active = true;
-    irq_unlock(fl);
-}
 
 /**
  * mouse_feed_byte - 向 PS/2 鼠标协议解析器喂一个字节
@@ -203,17 +180,13 @@ void mouse_feed_byte(uint8_t data) {
             /* 按钮状态（低 3 位：左键/右键/中键） */
             uint8_t btn = ps2_pkt[0] & 0x07;
 
-            /* 左键按下沿 = 一次点击：把文本光标放到指针位置。
-             * 文本光标受保护区域约束（只能待在可编辑范围内），
-             * 点击保护区域会被 vga_set_cursor 忽略。 */
-            if ((btn & 0x01) && !(prev_btn & 0x01)) {
-                vga_set_cursor(mouse_y, mouse_x);
-            }
-            prev_btn = btn;
+            /* ⚠️ 修复：鼠标不再控制文本光标、不再绘制指针方块。
+             * 原实现：左键点击跳文本光标（vga_set_cursor）、移动时
+             * 反显指针方块满屏跑——用户反馈'逆天，移动会控制光标'
+             * （指针方块在文本模式里长得就像光标，且点击误触会跳走
+             * 打字位置）。鼠标退化为纯坐标输入：仅更新位置/按钮
+             * 状态，供 mouse 命令等读取。 */
             mouse_btn = btn;
-
-            /* 指针自由移动：反显渲染跟随鼠标位置 */
-            pointer_draw(mouse_y, mouse_x);
         }
         ps2_pkt_cycle = 0;   /* 重置，准备下一个数据包 */
     }
@@ -331,9 +304,7 @@ static void usb_process_report(uint8_t *data, int len) {
     if (mouse_y < 0) mouse_y = 0;
     if (mouse_y >= 25) mouse_y = 24;
     mouse_btn = rep->buttons & 0x07;
-    /* ⚠️ 修复：与 PS/2 路径一致地渲染指针——旧实现只更新坐标不画指针，
-     * USB 鼠标移动时屏幕上没有指针反馈。 */
-    pointer_draw(mouse_y, mouse_x);
+    /* 坐标输入（不绘制指针——见 mouse_feed_byte 修复说明） */
 }
 
 /**
