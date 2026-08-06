@@ -175,13 +175,12 @@ char keyboard_get_char(void) {
             uint8_t sc = ps2_buffer[ps2_head];
             ps2_head = (ps2_head + 1) % PS2_BUFFER_SIZE;
 
-            /* 方向键：Up/Down 返回特殊码给 shell（命令历史），
-             * Left/Right 直接移动 VGA 光标（编辑当前行） */
+            /* 方向键：Up/Down 返回特殊码给 shell（命令历史） */
             if (!(sc & 0x80)) {
                 switch (sc) {
                     case 0x48: return 0x01;   /* Up → 历史上翻 */
                     case 0x50: return 0x02;   /* Down → 历史下翻 */
-                    case 0x4B: vga_move_left();  continue;
+                    case 0x4B: return '\b';  /* ← 当退格用：删光标前字符 */
                     case 0x4D: vga_move_right(); continue;
                     default: break;
                 }
