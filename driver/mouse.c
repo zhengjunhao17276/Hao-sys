@@ -519,11 +519,11 @@ void mouse_init(void) {
     if (ps2_init()) {
         current_backend = BACKEND_PS2;
         mouse_available = true;
-        /* 纯轮询模式：屏蔽鼠标 IRQ，避免与键盘轮询竞争 0x60 数据口
-         * （键盘 IRQ1 在 keyboard_init 里已屏蔽，保持一致）。
-         * 鼠标数据由 keyboard_get_char 的排空循环和 mouse_poll() 消费。 */
-        pic_mask_irq(12, true);
-        vga_write("[Mouse] Using PS/2 backend (polling).\n");
+        /* ⚠️ 架构升级：保持 IRQ12 中断模式——键盘等待从纯轮询改为
+         * sti;hlt 休眠后，鼠标数据由 IRQ12 中断喂给解析器（
+         * ps2_mouse_irq_handler），不再需要键盘排空循环代劳。
+         * 键盘 IRQ1 与鼠标 IRQ12 由 PS/2 控制器按来源区分，互不误读。 */
+        vga_write("[Mouse] Using PS/2 backend (interrupt-driven).\n");
         return;
     }
 

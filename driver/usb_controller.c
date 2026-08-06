@@ -370,27 +370,11 @@ static uint32_t schedule_qh_phys = 0;
  *  失败时已分配的页会被回滚释放。
  * ================================================================ */
 static void* alloc_phys_pages(int count, uint32_t *phys) {
-    void *first = NULL;
-    for (int i = 0; i < count; i++) {
-        void *p = pmm_alloc_page();
-        if (!p) {
-            for (int j = 0; j < i; j++)
-                pmm_free_page((void*)((uintptr_t)first + j * 4096));
-            return NULL;
-        }
-        if (i == 0) {
-            first = p;
-        } else {
-            /* 检查物理连续性：第 i 页的物理地址必须
-             * 紧跟在第 0 页之后 i×4KB 处。如果物理内存
-             * 分配器返回了非连续页，回滚并返回失败。*/
-            if ((uintptr_t)p != (uintptr_t)first + i * 4096) {
-                for (int j = 0; j <= i; j++)
-                    pmm_free_page((void*)((uintptr_t)first + j * 4096));
-                return NULL;
-            }
-        }
-    }
+    /* ⚠️ 架构升级：用 pmm_alloc_contiguous 一次性分配连续页
+     * （O(1) 空闲链表分配不保证连续；旧实现逐个分配 + 连续性检查，
+     * 碎片化时失败率高）。 */
+    void* first = pmm_alloc_contiguous((uint32_t)count);
+    if (!first) return NULL;
     *phys = (uint32_t)(uintptr_t)first;
     return first;
 }

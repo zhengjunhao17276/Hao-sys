@@ -285,9 +285,15 @@ char keyboard_get_char(void) {
             if (c) return c;
         }
 
-        /* 没有按键，直接轮询 PS/2 状态寄存器等待数据，一次读完所有可用字节 */
-        /* （纯轮询，完全不依赖 IRQ 中断，避免所有中断相关问题） */
+        /* ⚠️ 架构升级：等待按键改为中断休眠（sti;hlt）——旧实现纯轮询
+         * 忙等 CPU 100%。IRQ1（键盘）把扫描码存入环形缓冲、IRQ12（鼠标）
+         * 喂给鼠标解析器，都能唤醒 HLT。唤醒后检查缓冲。
+         * 注意：本函数运行在 syscall 上下文（IF=0），sti 只在这段
+         * 休眠窗口开中断；IRQ0 在该窗口触发时 from_user=0 不会调度，安全。 */
         while (!(inb(0x64) & 0x21)) {   /* bit0=键盘数据 或 bit5=鼠标数据 */
+            __asm__ volatile ("sti");
+            __asm__ volatile ("hlt");
+            __asm__ volatile ("cli");
             /* 也轮询 USB 键盘（非阻塞） */
             usb_keyboard_poll();
             if (usb_keyboard_has_char()) {

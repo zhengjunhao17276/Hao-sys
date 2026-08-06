@@ -62,6 +62,12 @@ static size_t free_pages = 0;
 /** 物理内存总大小（字节） */
 static size_t total_memory = 0;
 
+/* ⚠️ 架构升级：空闲页链表（O(1) 分配/释放）。
+ * 空闲页的第一个 4 字节存放链表下一项的页索引（页空闲时内容无意义），
+ * 不占额外内存。位图仍保留用于状态跟踪（是否占用、mark_region、
+ * 重复释放检测）。初始化时一次性遍历位图建链。 */
+static uint32_t free_list_head = (uint32_t)-1;   /* 链表头页索引，-1 = 空 */
+
 
 /* ============================================================
  *  地址 ↔ 位图索引 转换函数
@@ -392,6 +398,19 @@ void pmm_init(uint32_t info_addr) {
         vga_write("[PMM] FATAL: No free pages available.\n");
         while (1) __asm__ volatile ("hlt");
     }
+
+    /* ⚠️ 架构升级：初始化空闲页链表——遍历位图把所有空闲页挂链。
+     * 一次性 O(n)，此后 alloc/free 均为 O(1)。 */
+    free_list_head = (uint32_t)-1;
+    for (size_t i = 0; i < total_pages; i++) {
+        if (get_page_bit(i)) {
+            *(uint32_t*)index_to_addr(i) = free_list_head;
+            free_list_head = (uint32_t)i;
+        }
+    }
+    vga_write("[PMM] Free list built, head page index=");
+    vga_write_hex(free_list_head);
+    vga_write("\n");
 }
 
 
@@ -411,15 +430,53 @@ void pmm_init(uint32_t info_addr) {
  *  @return 物理页基地址（0x1000 对齐），失败返回 NULL
  * ============================================================ */
 void* pmm_alloc_page(void) {
+    /* ⚠️ 架构升级：O(1) 从空闲链表头取页（旧实现每次从头线性扫描位图） */
+    if (free_list_head == (uint32_t)-1) return NULL;   /* 链表空 */
+    uint32_t idx = free_list_head;
+    free_list_head = *(uint32_t*)index_to_addr(idx);   /* 取下一页索引 */
+    set_page_bit(idx, false);
+    free_pages--;
+    return (void*)index_to_addr(idx);
+}
+
+/**
+ * pmm_alloc_contiguous - 分配 count 个物理连续的页（供 DMA 使用）
+ * @count: 需要的连续页数
+ * @return 连续区域首地址，失败返回 NULL
+ *
+ * ⚠️ 架构升级：O(1) 链表分配不保证连续（USB 帧列表/TD 池需要），
+ * 此函数保留线性扫描找连续空闲段。仅在初始化阶段调用，一次性开销可接受。
+ */
+void* pmm_alloc_contiguous(uint32_t count) {
+    if (count == 0) return NULL;
     for (size_t i = 0; i < total_pages; i++) {
-        if (get_page_bit(i)) {
-            /* 找到空闲页 → 标记为已占用 */
-            set_page_bit(i, false);
-            free_pages--;
+        if (!get_page_bit(i)) continue;
+        /* 检查从 i 开始是否连续 count 个空闲页 */
+        uint32_t j;
+        for (j = 1; j < count && i + j < total_pages; j++) {
+            if (!get_page_bit(i + j)) break;
+        }
+        if (j == count) {
+            /* 命中：从链表摘除这 count 页（链表是单链，需遍历到它们） */
+            for (uint32_t k = 0; k < count; k++) {
+                /* 摘除页 i+k：从空闲链表移除 */
+                uint32_t prev = (uint32_t)-1;
+                uint32_t cur = free_list_head;
+                while (cur != (uint32_t)-1 && cur != i + k) {
+                    prev = cur;
+                    cur = *(uint32_t*)index_to_addr(cur);
+                }
+                if (cur == i + k) {
+                    if (prev == (uint32_t)-1) free_list_head = *(uint32_t*)index_to_addr(cur);
+                    else *(uint32_t*)index_to_addr(prev) = *(uint32_t*)index_to_addr(cur);
+                }
+                set_page_bit(i + k, false);
+                free_pages--;
+            }
             return (void*)index_to_addr(i);
         }
+        i += j;   /* 跳过不连续的部分 */
     }
-    /* 没有空闲页可用 */
     return NULL;
 }
 
@@ -446,6 +503,9 @@ void pmm_free_page(void* addr) {
     /* 仅当该页当前为"已占用"时才释放，避免重复释放 */
     if (!get_page_bit(idx)) {
         set_page_bit(idx, true);   /* 标记为空闲 */
+        /* ⚠️ 架构升级：O(1) 头插回空闲链表 */
+        *(uint32_t*)addr = free_list_head;
+        free_list_head = (uint32_t)idx;
         free_pages++;
     }
 }

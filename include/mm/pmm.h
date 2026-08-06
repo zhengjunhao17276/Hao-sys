@@ -43,6 +43,11 @@ void pmm_init(uint32_t info_addr);
 void* pmm_alloc_page(void);
 
 /**
+ * pmm_alloc_contiguous - 分配 count 个物理连续的页（DMA 用，初始化阶段）
+ */
+void* pmm_alloc_contiguous(uint32_t count);
+
+/**
  * pmm_free_page - 释放一个物理页
  * @addr: 要释放的物理页地址（必须是 4KB 对齐）
  */
