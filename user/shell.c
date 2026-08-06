@@ -380,12 +380,14 @@ static unsigned int readline(char* buf, unsigned int size) {
             hist_pos = 0;
             return pos;
         } else if (c == '\b') {
-            /* Backspace：回退一格 */
+            /* Backspace：回退一格。
+             * ⚠️ 修复：vga 的 '\b' 本身就是"左移 + 擦除"一步完成
+             * （putchar_core），旧代码按终端协议发 '\b 空格 \b' 三连
+             * 会擦两次——把前一个和后一个字符都抹掉（实测退格一次
+             * 少俩字符）。改单发 '\b'。 */
             if (pos > 0) {
                 pos--;
-                putchar('\b');   /* 光标左移 */
-                putchar(' ');    /* 擦除字符 */
-                putchar('\b');   /* 光标回到擦除位置 */
+                putchar('\b');
                 disp_len--;
             }
         } else if (c >= ' ' && c <= '~') {
