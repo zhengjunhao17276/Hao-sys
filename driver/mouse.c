@@ -27,6 +27,7 @@
 #include "../include/driver/vga.h"
 #include "../include/driver/io.h"
 #include "../include/driver/usb.h"
+#include "../include/driver/irqlock.h"
 #include <stdint.h>
 #include <stdbool.h>
 
@@ -133,13 +134,19 @@ static uint8_t pointer_glyph = MOUSE_POINTER_GLYPH_DEFAULT;
  * 由 vga.c 在一切文本输出前调用，防止输出字符和指针互相踩踏。
  */
 void mouse_pointer_erase(void) {
-    if (!pointer_active) return;
+    /* ⚠️ 内核态抢占：指针状态与显存写入必须与 vga 输出（持锁）互斥。
+     * 本函数可能从 vga 锁内（putchar_core）或 IRQ12 上下文调用，
+     * 嵌套锁安全（pushfl/popfl 配对）。 */
+    uint32_t fl = irq_lock();
+    if (!pointer_active) { irq_unlock(fl); return; }
     VGA_ADDR[pointer_row * VGA_WIDTH + pointer_col] = pointer_under;
     pointer_active = false;
+    irq_unlock(fl);
 }
 
 /** pointer_draw - 在指定位置绘制鼠标指针（固定图案 + 反显属性） */
 static void pointer_draw(int row, int col) {
+    uint32_t fl = irq_lock();
     /* 先恢复旧位置 */
     if (pointer_active) {
         VGA_ADDR[pointer_row * VGA_WIDTH + pointer_col] = pointer_under;
@@ -153,6 +160,7 @@ static void pointer_draw(int row, int col) {
     /* 用可配置图案渲染指针（默认实心方块） */
     VGA_ADDR[idx] = ((uint16_t)invert_attr(attr) << 8) | pointer_glyph;
     pointer_active = true;
+    irq_unlock(fl);
 }
 
 /**
