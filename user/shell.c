@@ -806,6 +806,9 @@ static void settings_tui(void) {
         }
     }
     clear_screen();
+    /* ⚠️ 修复：退出后光标定位到尾行——shell 提示符从最后一行
+     * 开始新的一行，而不是回到顶部与历史输出混在一起。 */
+    set_cursor(24, 0);
 }
 
 /** cmd_settings - settings 命令入口 */
