@@ -122,6 +122,11 @@ static uint16_t pointer_under = 0x0F20;
 /** 当前鼠标指针图案（0~255） */
 static uint8_t pointer_glyph = MOUSE_POINTER_GLYPH_DEFAULT;
 
+/** 属性反转：交换前景/背景 nibble（反显效果） */
+static uint8_t invert_attr(uint8_t attr) {
+    return (uint8_t)(((attr & 0x0F) << 4) | ((attr >> 4) & 0x0F));
+}
+
 /**
  * mouse_pointer_erase - 擦除鼠标指针（恢复被覆盖的字符）
  *
@@ -137,6 +142,25 @@ void mouse_pointer_erase(void) {
     pointer_active = false;
     irq_unlock(fl);
 }
+/** pointer_draw - 在指定位置绘制鼠标指针（固定图案 + 反显属性） */
+static void pointer_draw(int row, int col) {
+    uint32_t fl = irq_lock();
+    /* 先恢复旧位置 */
+    if (pointer_active) {
+        VGA_ADDR[pointer_row * VGA_WIDTH + pointer_col] = pointer_under;
+    }
+    pointer_row = row;
+    pointer_col = col;
+
+    uint32_t idx = row * VGA_WIDTH + col;
+    pointer_under = VGA_ADDR[idx];
+    uint8_t attr = (pointer_under >> 8) & 0xFF;
+    /* 用可配置图案渲染指针（默认实心方块） */
+    VGA_ADDR[idx] = ((uint16_t)invert_attr(attr) << 8) | pointer_glyph;
+    pointer_active = true;
+    irq_unlock(fl);
+}
+
 
 
 
@@ -180,13 +204,14 @@ void mouse_feed_byte(uint8_t data) {
             /* 按钮状态（低 3 位：左键/右键/中键） */
             uint8_t btn = ps2_pkt[0] & 0x07;
 
-            /* ⚠️ 修复：鼠标不再控制文本光标、不再绘制指针方块。
-             * 原实现：左键点击跳文本光标（vga_set_cursor）、移动时
-             * 反显指针方块满屏跑——用户反馈'逆天，移动会控制光标'
-             * （指针方块在文本模式里长得就像光标，且点击误触会跳走
-             * 打字位置）。鼠标退化为纯坐标输入：仅更新位置/按钮
-             * 状态，供 mouse 命令等读取。 */
+            /* ⚠️ 修复（f173359 修正）：左键点击**不再**跳文本光标
+             * （vga_set_cursor 已删除——误触会跳走打字位置）；
+             * 指针绘制保留（用户需要看得见鼠标），反显方块跟随
+             * 移动，但不影响文本光标与输入。 */
             mouse_btn = btn;
+
+            /* 指针自由移动：反显渲染跟随鼠标位置 */
+            pointer_draw(mouse_y, mouse_x);
         }
         ps2_pkt_cycle = 0;   /* 重置，准备下一个数据包 */
     }
@@ -304,7 +329,8 @@ static void usb_process_report(uint8_t *data, int len) {
     if (mouse_y < 0) mouse_y = 0;
     if (mouse_y >= 25) mouse_y = 24;
     mouse_btn = rep->buttons & 0x07;
-    /* 坐标输入（不绘制指针——见 mouse_feed_byte 修复说明） */
+    /* 指针跟随（与 PS/2 路径一致） */
+    pointer_draw(mouse_y, mouse_x);
 }
 
 /**
