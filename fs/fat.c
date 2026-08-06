@@ -37,6 +37,7 @@
 #include "../include/fs/fat.h"
 #include <stdint.h>
 #include <stdbool.h>
+#include "../include/driver/irqlock.h"
 
 /* ============================================================
  *  全局变量定义（fat_init() 中初始化）
@@ -225,7 +226,10 @@ bool fat_init(void) {
 }
 
 fat_type_t fat_get_type(void) {
-    return fs_type;
+    uint32_t fl = irq_lock();
+    fat_type_t t = fs_type;
+    irq_unlock(fl);
+    return t;
 }
 
 
@@ -274,7 +278,8 @@ static void make_83_name(const char* filename, char name_83[12]) {
  *  特殊标记：0x00=目录项及其后为空；0xE5=已删除；0x2E="."/".."
  * ============================================================ */
 uint32_t fat_read_dir(uint32_t dir_cluster, fat_dirent_t* entries, uint32_t max_entries) {
-    if (!fat_initialized || !entries || max_entries == 0) return 0;
+    uint32_t fl = irq_lock();
+    if (!fat_initialized || !entries || max_entries == 0) { irq_unlock(fl); return 0; }
 
     uint32_t index = 0;
     uint32_t cluster = dir_cluster;
@@ -297,7 +302,7 @@ uint32_t fat_read_dir(uint32_t dir_cluster, fat_dirent_t* entries, uint32_t max_
             fat_dirent_t* dirent = (fat_dirent_t*)sector_buffer;
             uint32_t per_sector = bytes_per_sector / 32;
             for (uint32_t i = 0; i < per_sector && index < max_entries; i++) {
-                if (dirent[i].name[0] == 0x00) return index;
+                if (dirent[i].name[0] == 0x00) { irq_unlock(fl); return index; }
                 if ((uint8_t)dirent[i].name[0] == 0xE5) continue;
                 entries[index++] = dirent[i];
             }
@@ -308,6 +313,7 @@ uint32_t fat_read_dir(uint32_t dir_cluster, fat_dirent_t* entries, uint32_t max_
         if (next >= 0x0FFFFFF8) break;
         cluster = next;
     }
+    irq_unlock(fl);
     return index;
 }
 
@@ -561,7 +567,8 @@ static uint32_t fat_resolve_parent(const char* path, char out_name_83[12],
  *  返回：目录簇号（根目录 = 0）；失败（不存在或不是目录）返回 0xFFFFFFFF。
  * ============================================================ */
 uint32_t fat_open_dir(const char* path) {
-    if (!path || path[0] == '\0') return 0;
+    uint32_t fl = irq_lock();
+    if (!path || path[0] == '\0') { irq_unlock(fl); return 0; }
 
     char seg[16];
     uint32_t cur = 0;
@@ -576,8 +583,8 @@ uint32_t fat_open_dir(const char* path) {
                 char name_83[12];
                 make_83_name(seg, name_83);
                 fat_dirent_t entry;
-                if (!dir_find_name(cur, name_83, &entry)) return 0xFFFFFFFF;
-                if (!(entry.attributes & 0x10)) return 0xFFFFFFFF;   /* 不是目录 */
+                if (!dir_find_name(cur, name_83, &entry)) { irq_unlock(fl); return 0xFFFFFFFF; }
+                if (!(entry.attributes & 0x10)) { irq_unlock(fl); return 0xFFFFFFFF; }   /* 不是目录 */
                 cur = (entry.cluster_high << 16) | entry.cluster_low;
                 seg_len = 0;
                 have_seg = false;
@@ -590,6 +597,7 @@ uint32_t fat_open_dir(const char* path) {
         have_seg = true;
         p++;
     }
+    irq_unlock(fl);
     return cur;
 }
 
@@ -599,14 +607,16 @@ uint32_t fat_open_dir(const char* path) {
  *  流程：路径解析 → 末段 8.3 名匹配。找到返回 true 并填充目录项。
  * ============================================================ */
 bool fat_find_file(const char* filename, fat_dirent_t* out_entry) {
-    if (!fat_initialized || !filename || !out_entry) return false;
+    uint32_t fl = irq_lock();
+    if (!fat_initialized || !filename || !out_entry) { irq_unlock(fl); return false; }
 
     char name_83[12];
     fat_dirent_t entry;
     bool exists = false;
     uint32_t parent = fat_resolve_parent(filename, name_83, &entry, &exists);
-    if (parent == 0xFFFFFFFF || !exists) return false;
+    if (parent == 0xFFFFFFFF || !exists) { irq_unlock(fl); return false; }
     *out_entry = entry;
+    irq_unlock(fl);
     return true;
 }
 
@@ -619,7 +629,8 @@ bool fat_find_file(const char* filename, fat_dirent_t* out_entry) {
  *    簇 N 的扇区 = first_data_sector + (N-2) * sectors_per_cluster
  * ============================================================ */
 uint32_t fat_load_file(const fat_dirent_t* entry, void* buffer, uint32_t max_size) {
-    if (!fat_initialized || !entry || !buffer || max_size == 0) return 0;
+    uint32_t fl = irq_lock();
+    if (!fat_initialized || !entry || !buffer || max_size == 0) { irq_unlock(fl); return 0; }
 
     uint32_t first_cluster = (entry->cluster_high << 16) | entry->cluster_low;
     uint32_t file_size = entry->file_size;
@@ -628,13 +639,15 @@ uint32_t fat_load_file(const fat_dirent_t* entry, void* buffer, uint32_t max_siz
     uint8_t* dest = (uint8_t*)buffer;
     uint32_t remaining = file_size;
     uint32_t cluster = first_cluster;
-    if (cluster < 2) return 0;
+    if (cluster < 2) { irq_unlock(fl); return 0; }
 
     while (remaining > 0 && cluster < 0x0FFFFFF8) {
         uint32_t lba = first_data_sector + (cluster - 2) * sectors_per_cluster;
         for (uint32_t s = 0; s < sectors_per_cluster && remaining > 0; s++) {
-            if (!read_sector(lba + s, sector_buffer))
+            if (!read_sector(lba + s, sector_buffer)) {
+                irq_unlock(fl);
                 return file_size - remaining;
+            }
             uint32_t copy = (remaining < bytes_per_sector) ? remaining : bytes_per_sector;
             memcpy(dest, sector_buffer, copy);
             dest += copy;
@@ -644,6 +657,7 @@ uint32_t fat_load_file(const fat_dirent_t* entry, void* buffer, uint32_t max_siz
         if (next >= 0x0FFFFFF8) break;
         cluster = next;
     }
+    irq_unlock(fl);
     return file_size - remaining;
 }
 
@@ -718,7 +732,7 @@ bool fat_delete_file(const char* filename) {
  *        → 写数据扇区 → 填目录项。
  *  返回 true=成功，false=失败（空间不足 / 路径不存在 / 不能覆盖目录）。
  * ============================================================ */
-bool fat_write_file(const char* filename, const void* data, uint32_t size) {
+static bool fat_write_file_impl(const char* filename, const void* data, uint32_t size) {
     if (!fat_initialized || !filename || !data) return false;
 
     char name_83[12];
@@ -816,6 +830,14 @@ bool fat_write_file(const char* filename, const void* data, uint32_t size) {
     return true;
 }
 
+/* ⚠️ 架构升级（内核态抢占）：锁包装 */
+bool fat_write_file(const char* filename, const void* data, uint32_t size) {
+    uint32_t fl = irq_lock();
+    bool r = fat_write_file_impl(filename, data, size);
+    irq_unlock(fl);
+    return r;
+}
+
 
 /* ============================================================
  *  fat_mkdir - 创建子目录（支持 "DIR1/DIR2" 多级路径，最后一级为新建目标）
@@ -824,7 +846,7 @@ bool fat_write_file(const char* filename, const void* data, uint32_t size) {
  *        → 在父目录找空闲项（满则扩展）→ 填目录项（属性 0x10）。
  *  返回 true=成功，false=失败（已存在 / 中间路径不存在 / 空间不足）。
  * ============================================================ */
-bool fat_mkdir(const char* path) {
+static bool fat_mkdir_impl(const char* path) {
     if (!fat_initialized || !path) return false;
 
     char name_83[12];
@@ -903,4 +925,12 @@ bool fat_mkdir(const char* path) {
     if (!write_sector(entry_sector, sector_buffer)) { fat_free_chain(new_cluster); return false; }
 
     return true;
+}
+
+/* ⚠️ 架构升级（内核态抢占）：锁包装 */
+bool fat_mkdir(const char* path) {
+    uint32_t fl = irq_lock();
+    bool r = fat_mkdir_impl(path);
+    irq_unlock(fl);
+    return r;
 }

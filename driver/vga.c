@@ -21,6 +21,7 @@
 #include "../include/driver/vga.h"
 #include "../include/driver/io.h"
 #include "../include/driver/mouse.h"
+#include "../include/driver/irqlock.h"
 #include <stddef.h>
 #include <stdbool.h>
 
@@ -59,11 +60,13 @@ static bool is_position_protected(int row, int col) {
  * 向 VGA CRTC 寄存器写入光标位置（80 × row + col）。
  */
 void vga_update_cursor(void) {
+    uint32_t fl = irq_lock();
     uint16_t pos = cursor_row * VGA_WIDTH + cursor_col;
     outb(0x3D4, 0x0F);                         /* 选择光标位置低位寄存器 */
     outb(0x3D5, (uint8_t)(pos & 0xFF));        /* 写入低位 */
     outb(0x3D4, 0x0E);                         /* 选择光标位置高位寄存器 */
     outb(0x3D5, (uint8_t)((pos >> 8) & 0xFF)); /* 写入高位 */
+    irq_unlock(fl);
 }
 
 /* ==================== 初始化和清屏 ==================== */
@@ -105,6 +108,7 @@ void vga_init(void) {
  * vga_clear - 清空屏幕（所有字符填空格）并重置光标到 (0,0)
  */
 void vga_clear(void) {
+    uint32_t fl = irq_lock();
     mouse_pointer_erase();   /* 指针先擦掉，避免残留 */
     for (int i = 0; i < VGA_WIDTH * VGA_HEIGHT; i++)
         VGA_ADDR[i] = ((uint16_t)default_color << 8) | ' ';
@@ -112,6 +116,7 @@ void vga_clear(void) {
     cursor_col = 0;
     protection_enabled = false;
     vga_update_cursor();
+    irq_unlock(fl);
 }
 
 /* ==================== 屏幕滚动 ==================== */
@@ -249,15 +254,22 @@ static void putchar_core(char c, uint8_t color) {
 /* ==================== 对外接口 ==================== */
 
 void vga_putchar(char c) {
+    uint32_t fl = irq_lock();
     putchar_core(c, default_color);
+    irq_unlock(fl);
 }
 
 void vga_write(const char *str) {
-    while (*str) vga_putchar(*str++);
+    /* 整串一把锁：内部直接调 putchar_core（不再经 vga_putchar 重复加锁） */
+    uint32_t fl = irq_lock();
+    while (*str) putchar_core(*str++, default_color);
+    irq_unlock(fl);
 }
 
 void vga_write_color(const char *str, uint8_t color) {
+    uint32_t fl = irq_lock();
     while (*str) putchar_core(*str++, color);
+    irq_unlock(fl);
 }
 
 /**
@@ -304,6 +316,7 @@ uint32_t vga_get_cursor_pos(void) {
 }
 
 void vga_set_protected_position(int row, int col) {
+    uint32_t fl = irq_lock();
     if (row < 0) row = 0;
     if (row >= VGA_HEIGHT) row = VGA_HEIGHT - 1;
     if (col < 0) col = 0;
@@ -311,19 +324,25 @@ void vga_set_protected_position(int row, int col) {
     protected_row = row;
     protected_col = col;
     protection_enabled = true;
+    irq_unlock(fl);
 }
 
 void vga_disable_protection(void) {
+    uint32_t fl = irq_lock();
     protection_enabled = false;
+    irq_unlock(fl);
 }
 
 void vga_protect_before_cursor(void) {
+    uint32_t fl = irq_lock();
     vga_set_protected_position(cursor_row, cursor_col);
+    irq_unlock(fl);
 }
 
 /* ==================== 光标移动（带保护区域检查） ==================== */
 
 void vga_move_left(void) {
+    uint32_t fl = irq_lock();
     int new_row = cursor_row, new_col = cursor_col;
     if (cursor_col > 0) {
         new_col = cursor_col - 1;
@@ -333,14 +352,15 @@ void vga_move_left(void) {
     } else {
         return;
     }
-    if (is_position_protected(new_row, new_col))
-        return;
+    if (is_position_protected(new_row, new_col)) { irq_unlock(fl); return; }
     cursor_row = new_row;
     cursor_col = new_col;
     vga_update_cursor();
+    irq_unlock(fl);
 }
 
 void vga_move_right(void) {
+    uint32_t fl = irq_lock();
     int new_row = cursor_row, new_col = cursor_col;
     if (cursor_col < VGA_WIDTH - 1) {
         new_col = cursor_col + 1;
@@ -350,31 +370,33 @@ void vga_move_right(void) {
     } else {
         return;
     }
-    if (is_position_protected(new_row, new_col))
-        return;
+    if (is_position_protected(new_row, new_col)) { irq_unlock(fl); return; }
     cursor_row = new_row;
     cursor_col = new_col;
     vga_update_cursor();
+    irq_unlock(fl);
 }
 
 void vga_move_up(void) {
-    if (cursor_row == 0) return;
+    uint32_t fl = irq_lock();
+    if (cursor_row == 0) { irq_unlock(fl); return; }
     int new_row = cursor_row - 1;
     int new_col = cursor_col;
-    if (is_position_protected(new_row, new_col))
-        return;
+    if (is_position_protected(new_row, new_col)) { irq_unlock(fl); return; }
     cursor_row = new_row;
     vga_update_cursor();
+    irq_unlock(fl);
 }
 
 void vga_move_down(void) {
-    if (cursor_row == VGA_HEIGHT - 1) return;
+    uint32_t fl = irq_lock();
+    if (cursor_row == VGA_HEIGHT - 1) { irq_unlock(fl); return; }
     int new_row = cursor_row + 1;
     int new_col = cursor_col;
-    if (is_position_protected(new_row, new_col))
-        return;
+    if (is_position_protected(new_row, new_col)) { irq_unlock(fl); return; }
     cursor_row = new_row;
     vga_update_cursor();
+    irq_unlock(fl);
 }
 
 /**
@@ -387,17 +409,18 @@ void vga_move_down(void) {
  * 和键盘方向键（vga_move_*）控制光标的体验一致。
  */
 void vga_set_cursor(int row, int col) {
+    uint32_t fl = irq_lock();
     if (row < 0) row = 0;
     if (row >= VGA_HEIGHT) row = VGA_HEIGHT - 1;
     if (col < 0) col = 0;
     if (col >= VGA_WIDTH) col = VGA_WIDTH - 1;
 
-    if (is_position_protected(row, col))
-        return;
+    if (is_position_protected(row, col)) { irq_unlock(fl); return; }
 
     cursor_row = row;
     cursor_col = col;
     vga_update_cursor();
+    irq_unlock(fl);
 }
 
 /* ==================== 提示区域存根（当前为空实现） ==================== */

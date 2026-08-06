@@ -45,8 +45,13 @@ void pit_tick_handler(int from_user) {
      * 宏尾部（call 之后）的 EOI 永远不会执行 → PIC 卡死。 */
     pic_send_eoi(0);
 
-    /* 只有用户态被中断时才考虑抢占（内核态共享状态不可重入） */
-    if (from_user && current_task && current_task->is_user) {
+    /* ⚠️ 架构升级（#4 内核态抢占）：不再限制用户态。
+     * 安全性由 irqlock（VGA/FAT 等共享状态持锁期间 IF=0，IRQ0 被屏蔽，
+     * 持锁者不会被抢占）保证——不持锁的内核代码可被抢占，恢复靠
+     * 中断帧 iret（CS 保持 0x08 回内核态），与用户态抢占同一机制。
+     * from_user 参数保留（调试用），不再作为调度条件。 */
+    (void)from_user;
+    if (current_task && current_task->is_user) {
         current_task->ticks_used++;
         if (current_task->ticks_used >= TIME_SLICE_TICKS) {
             current_task->ticks_used = 0;
