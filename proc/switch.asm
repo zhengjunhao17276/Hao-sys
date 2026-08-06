@@ -112,7 +112,12 @@ switch_to_user:
 .skip_save:
 
     ; 加载 next 的栈指针——指向其内核栈上的 iret 帧
+    ; ⚠️ 修复：约定 task->esp = iret 帧起点 - 4（中断入口在 push eax
+    ; 之后保存 esp，天然差 4 字节；task_create_user 也用占位字对齐）。
+    ; 这里必须 add esp,4 对准 EIP 槽，否则 iret 会把 EIP 弹成
+    ; 保存的 EAX（系统调用号）→ 跳飞。
     mov esp, [edx]
+    add esp, 4
 
     ; 设置用户数据段选择子（ring 3）
     mov ax, 0x23

@@ -286,6 +286,17 @@ static void load_and_run_shell(void) {
     /* 打印所有任务状态供调试 */
     task_dump_all();
 
+    /* ⚠️ 修复：让调度器知道真正在运行的是 shell。
+     * 之前 current_task 一直是 idle——裸 iret 进用户态后，
+     * int 0x80/IRQ 入口的 mov [current_task], esp 会把 shell 的
+     * 中断帧写进 idle 的 PCB（污染 idle->esp）。
+     * 一旦调度器切到 idle 就会从垃圾栈 popa → 崩溃。
+     * 把 idle 留在 RUNNING 态即可：round-robin 只选 READY 任务，
+     * idle 永远不会被选中（它也没有可执行代码）。 */
+    extern task_t* current_task;
+    shell_task->state = TASK_RUNNING;
+    current_task = shell_task;
+
     /* ========== 8. 手动切换到用户任务 ==========
      *
      * 通过 iret 从 ring 0 切换到 ring 3。关键步骤：

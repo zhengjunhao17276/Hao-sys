@@ -33,19 +33,31 @@ section .text
 ; 页错误（#PF, 14）等。
 ;
 ; 发生异常时：
-;   1. 用 pusha 保存所有通用寄存器
-;   2. 在 VGA 终端左上角打印 "EX:XX EIP=xxxxxxxx"（异常号 + 返回地址）
-;   3. 用 popa + iret 返回（不 halt，方便调试定位问题）
+;   1. 丢弃 CPU 压入的错误码（#8/#10-#14/#17 才有）
+;   2. 用 pusha 保存所有通用寄存器
+;   3. 在 VGA 终端左上角打印 "EX:XX" + 栈上几个关键值（含 EIP）
+;   4. 进入无限 HLT（异常意味着内核 bug，不应继续执行）
 ;
-; 栈布局（从低到高）：
+; ⚠️ 错误码异常（#DB 除外）：#8 双重故障、#10 无效 TSS、#11 段不存在、
+;    #12 栈段错误、#13 一般保护、#14 页错误、#17 对齐检查 会由 CPU
+;    在压入 EIP/CS/EFLAGS 之前先压入一个 4 字节错误码。
+;    若不丢弃，pusha 后的栈偏移全部错位——打印的 "EIP" 会读到错误码。
+;    页错误（#PF）时尤其重要：EIP 错一个字节都定位不到真正的出错指令。
+;
+; 统一后的栈布局（从低到高，相对 pusha 后的 esp）：
 ;   pusha 压入的 8 个 regs (32 字节)
-;   EFLAGS (4 字节)  ← CPU 异常自动压入
-;   CS (4 字节)
-;   EIP (4 字节)     ← 异常发生时正在执行的指令地址
+;   EIP   (4 字节)  ← 偏移 32：异常发生时正在执行的指令地址
+;   CS    (4 字节)  ← 偏移 36
+;   EFLAGS(4 字节)  ← 偏移 40
+;   （若从 ring3 触发）用户 ESP ← 偏移 44
 ; =============================================================================
-%macro EXCEPTION 1
+%macro EXCEPTION 2   ; %1 = 异常号, %2 = 是否压入错误码 (1=是, 0=否)
 global exc%1_handler
 exc%1_handler:
+    %if %2
+        ; 该异常带错误码：先丢弃，统一后续栈偏移
+        add esp, 4
+    %endif
     pusha
 
     ; ---- 打印 "EX:XX" ----
@@ -186,26 +198,27 @@ exc%1_handler:
 %endmacro
 
 ; 批量定义异常 0-19 的处理程序
-EXCEPTION 0
-EXCEPTION 1
-EXCEPTION 2
-EXCEPTION 3
-EXCEPTION 4
-EXCEPTION 5
-EXCEPTION 6
-EXCEPTION 7
-EXCEPTION 8
-EXCEPTION 9
-EXCEPTION 10
-EXCEPTION 11
-EXCEPTION 12
-EXCEPTION 13
-EXCEPTION 14
-EXCEPTION 15
-EXCEPTION 16
-EXCEPTION 17
-EXCEPTION 18
-EXCEPTION 19
+; 第二个参数 = 是否压入错误码（8,10,11,12,13,14,17 为 1）
+EXCEPTION 0, 0
+EXCEPTION 1, 0
+EXCEPTION 2, 0
+EXCEPTION 3, 0
+EXCEPTION 4, 0
+EXCEPTION 5, 0
+EXCEPTION 6, 0
+EXCEPTION 7, 0
+EXCEPTION 8, 1
+EXCEPTION 9, 0
+EXCEPTION 10, 1
+EXCEPTION 11, 1
+EXCEPTION 12, 1
+EXCEPTION 13, 1
+EXCEPTION 14, 1
+EXCEPTION 15, 0
+EXCEPTION 16, 0
+EXCEPTION 17, 1
+EXCEPTION 18, 0
+EXCEPTION 19, 0
 
 ; =============================================================================
 ; IRQ 处理宏：IRQ num, pic_irq_num
@@ -226,6 +239,8 @@ EXCEPTION 19
 global irq%1_handler
 irq%1_handler:
     ; 保存当前用户任务的 esp（指向 CPU 压入的 iret 帧）。
+    ; 注意：刚 push eax，所以 esp = iret 帧起点 - 4，
+    ; 与 switch_to_user 的 add esp,4 约定一致（task->esp = EIP槽-4）。
     ; 调度器切到其他任务后，切回时靠它恢复用户上下文。
     ; 内核态（IF=0）不会触发 IRQ，所以这里一定是用户任务。
     ; 注意：eax 是用户的寄存器，必须先 push 保护再使用！
@@ -331,7 +346,8 @@ global isr80_handler
 isr80_handler:
     ; 保存当前用户任务的 esp（指向 CPU 压入的 iret 帧）。
     ; 这样调度器切换到其他任务后，还能通过 switch_to_user 切回来。
-    ; 此时 esp 正指向 iret 帧的 EIP 槽（esp0-20）。
+    ; 注意：刚 push eax，所以 esp = iret 帧起点 - 4，
+    ; 与 switch_to_user 的 add esp,4 约定一致（task->esp = EIP槽-4）。
     ; ⚠️ eax 里是系统调用号，必须先 push 保护，用完再 pop 恢复！
     push eax
     mov eax, [current_task]

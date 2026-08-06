@@ -382,12 +382,18 @@ task_t* task_create_user(const char* name, void* entry, void* stack) {
     uint32_t* frame = (uint32_t*)((uint32_t)kstack + PAGE_SIZE);
 
     /* 压入 iret 帧（按照 iret 弹出的顺序反着压）：
-     * iret 弹出顺序：EIP, CS, EFLAGS, ESP, SS */
+     * iret 弹出顺序：EIP, CS, EFLAGS, ESP, SS
+     * ⚠️ 修复：最后再压一个占位字，让 task->esp 指向 EIP 槽 - 4。
+     * 约定：task->esp = iret 帧起点 - 4。中断入口（isr80_handler/IRQ）
+     * 在 push eax 之后保存 esp，存的正是这个值；switch_to_user 恢复时
+     * add esp,4 再 iret。若不统一，首次进入（esp=EIP 槽）和中断后
+     * 恢复（esp=EIP槽-4）两种路径不一致，iret 会弹错位置跳飞。 */
     *--frame = 0x23;                          /* SS  = 用户数据段, ring 3 */
     *--frame = (uint32_t)stack + PAGE_SIZE;   /* ESP = 用户栈顶 */
     *--frame = 0x200;                         /* EFLAGS: IF=1（开中断） */
     *--frame = 0x1B;                          /* CS  = 用户代码段, ring 3 */
     *--frame = (uint32_t)entry;               /* EIP = 用户代码入口 */
+    *--frame = 0;                             /* 占位：对齐约定（esp = EIP槽-4） */
 
     task->pid = next_pid++;
     task->state = TASK_READY;
