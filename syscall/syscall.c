@@ -202,11 +202,17 @@ static int sys_list(uint32_t path, uint32_t buf, uint32_t max) {
     if (!vmm_is_user_accessible(buf + (max - 1) * 32)) return -1;
 
     const char* p = path ? (const char*)path : NULL;
-    /* /dev 虚拟目录：大小写不敏感匹配 */
+    /* /dev 虚拟目录：大小写不敏感匹配 → 枚举设备 */
     if (p && p[0] == '/' &&
         (p[1]=='d'||p[1]=='D') && (p[2]=='e'||p[2]=='E') &&
         (p[3]=='v'||p[3]=='V') && p[4] == '\0') {
         return (int)vfs_list_devices((fat_dirent_t*)buf, max);
+    }
+    /* /mnt 虚拟目录 → 列出已挂载的非根挂载点 */
+    if (p && p[0] == '/' &&
+        (p[1]=='m'||p[1]=='M') && (p[2]=='n'||p[2]=='N') &&
+        (p[3]=='t'||p[3]=='T') && p[4] == '\0') {
+        return (int)vfs_list_mount_points((fat_dirent_t*)buf, max);
     }
 
     const char* sub;
@@ -214,7 +220,32 @@ static int sys_list(uint32_t path, uint32_t buf, uint32_t max) {
     if (!fs) return -1;
     uint32_t dir_cluster = fat_open_dir(fs, sub);
     if (dir_cluster == 0xFFFFFFFF) return -1;
-    return (int)fat_read_dir(fs, dir_cluster, (fat_dirent_t*)buf, max);
+    int n = (int)fat_read_dir(fs, dir_cluster, (fat_dirent_t*)buf, max);
+
+    /* 根目录：追加虚拟目录项 DEV、MNT（系统挂载出来的，不在硬盘上） */
+    if (n >= 0 && (!p || (p[0] == '/' && p[1] == '\0'))) {
+        int total = n;
+        /* DEV */
+        if (total < (int)max) {
+            fat_dirent_t* e = &((fat_dirent_t*)buf)[total];
+            for (int j = 0; j < 32; j++) ((uint8_t*)e)[j] = 0;
+            const char* dn = "DEV         ";
+            for (int j = 0; j < 11; j++) e->name[j] = (uint8_t)dn[j];
+            e->attributes = 0x10;   /* 目录 */
+            total++;
+        }
+        /* MNT */
+        if (total < (int)max) {
+            fat_dirent_t* e = &((fat_dirent_t*)buf)[total];
+            for (int j = 0; j < 32; j++) ((uint8_t*)e)[j] = 0;
+            const char* mn = "MNT         ";
+            for (int j = 0; j < 11; j++) e->name[j] = (uint8_t)mn[j];
+            e->attributes = 0x10;   /* 目录 */
+            total++;
+        }
+        return total;
+    }
+    return n;
 }
 
 static int sys_tasks(void) {

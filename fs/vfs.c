@@ -191,6 +191,47 @@ uint32_t vfs_list_devices(fat_dirent_t* entries, uint32_t max) {
     return n;
 }
 
+/* 把挂载点路径的最后一段提取为 8.3 目录名（"/mnt/usb" → "USB"）。
+ * 返回名字长度（0=根挂载点，无名字）。 */
+static unsigned int mount_point_name(const char* point, char* out, unsigned int out_size) {
+    /* 找最后一个 '/' 之后的部分 */
+    const char* last = NULL;
+    for (const char* q = point; *q; q++) {
+        if (*q == '/') last = q + 1;
+    }
+    if (!last || *last == '\0') return 0;
+    unsigned int k = 0;
+    while (last[k] && k < out_size - 1) {
+        char c = last[k];
+        if (c >= 'a' && c <= 'z') c -= 32;   /* 8.3 大写 */
+        out[k] = c;
+        k++;
+    }
+    out[k] = '\0';
+    return k;
+}
+
+/* 虚拟 /mnt 目录内容：列出所有已挂载的非根挂载点（挂载点最后一段），
+ * 属性=目录。挂载了就出现、卸载就消失——挂载点由系统挂载出来。 */
+uint32_t vfs_list_mount_points(fat_dirent_t* entries, uint32_t max) {
+    uint32_t n = 0;
+    for (uint32_t i = 0; i < VFS_MAX_MOUNTS && n < max; i++) {
+        if (!mounts[i].mounted || !mounts[i].mount_point) continue;
+        if (strcmp(mounts[i].mount_point, "/") == 0) continue;  /* 跳过根挂载 */
+        char name[12];
+        unsigned int len = mount_point_name(mounts[i].mount_point, name, sizeof(name));
+        if (len == 0) continue;
+        fat_dirent_t* e = &entries[n];
+        for (int j = 0; j < 32; j++) ((uint8_t*)e)[j] = 0;
+        unsigned int k = 0;
+        while (k < len && k < 11) { e->name[k] = (uint8_t)name[k]; k++; }
+        while (k < 11) e->name[k++] = ' ';
+        e->attributes = 0x10;                    /* 目录 */
+        n++;
+    }
+    return n;
+}
+
 /* 打印设备与挂载表（devices 命令用，内核态 vga 输出） */
 void vfs_print_devices(void) {
     vga_write("[VFS] Registered devices:\n");

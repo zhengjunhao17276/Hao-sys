@@ -36,4 +36,8 @@ void vfs_print_devices(void);
  * attributes=0x20（文件）、file_size=扇区数×512。 */
 uint32_t vfs_list_devices(fat_dirent_t* entries, uint32_t max);
 
+/* 虚拟 /mnt 目录：列出所有已挂载的非根挂载点（挂载点最后一段，
+ * 属性=目录）。挂载了就出现、卸载就消失。 */
+uint32_t vfs_list_mount_points(fat_dirent_t* entries, uint32_t max);
+
 #endif
