@@ -77,4 +77,5 @@ MIT
 
 ## 文档
 
-- [doc/shell-developer-guide.md](doc/shell-developer-guide.md)——内核接口档案：写给想写 Shell / 用户态程序的人（31 个 syscall 全表、加载约定、键盘特殊码、8.3 目录项、构建方式）
+- [doc/syscalls.md](doc/syscalls.md)——系统调用档案：31 个调用全表，参数/返回值/错误语义/示例
+- [doc/shell-developer-guide.md](doc/shell-developer-guide.md)——内核接口档案：写给想写 Shell / 用户态程序的人（加载约定、键盘特殊码、8.3 目录项、构建方式）

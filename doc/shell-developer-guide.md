@@ -54,56 +54,36 @@ static int getmouse(int *x, int *y, int *buttons) {
 
 ## 3. 系统调用完整列表（31 个）
 
-### 终端输出
+完整档案见 [syscalls.md](syscalls.md)——每个调用的参数、返回值、错误语义、示例都有。这里只列分类速查表：
 
-| 号 | 名称 | 参数 | 返回 | 说明 |
-|---|---|---|---|---|
-| 1 | `SYS_PUTCHAR` | ebx=字符 | 0 | 输出一个字符 |
-| 3 | `SYS_WRITE` | ebx=字符串 | 0 / -1 | 输出 NUL 结尾字符串（≤4096B） |
-| 7 | `SYS_SET_CURSOR` | ebx=行, ecx=列 | 0 | 定位光标（越界截断） |
-| 8 | `SYS_GET_CURSOR` | — | (行<<16)\|列 | 读光标位置 |
-| 9 | `SYS_CLEAR` | — | 0 | 清屏 |
-| 12 | `SYS_GET_COLOR` | — | 属性字节 | 读默认颜色 |
-| 13 | `SYS_SET_COLOR` | ebx=属性字节 | 0 | 写默认颜色（如 0x0F=黑底白字） |
-| 14 | `SYS_PROTECT` | — | 0 | 光标处设保护边界，之前区域只读 |
+| 类 | 调用 |
+|---|---|
+| 终端输出 | PUTCHAR(1) WRITE(3) SET_CURSOR(7) GET_CURSOR(8) CLEAR(9) GET_COLOR(12) SET_COLOR(13) PROTECT(14) |
+| 键盘鼠标 | GETCHAR(2) GETKEY_NB(31) GETMOUSE(6) GET_SENS(10) SET_SENS(11) GET_PGLYPH(15) SET_PGLYPH(16) |
+| 文件系统 | WRITE_FILE(17) READ_FILE(18) DELETE_FILE(22) MKDIR(24) LIST(25) MOUNT(28) UMOUNT(29) |
+| 系统信息 | EXIT(4) READ_SECT(5) TASKS(19) GET_TIME(20) GET_DATE(21) UPTIME(23) YIELD(26) USB_INFO(27) DEVICES(30) |
 
-### 键盘 / 鼠标
+调用约定：`eax=调用号, ebx/ecx/edx=参数, int $0x80, 返回值在 eax`。内联汇编封装示例：
 
-| 号 | 名称 | 参数 | 返回 | 说明 |
-|---|---|---|---|---|
-| 2 | `SYS_GETCHAR` | — | 键值 | **阻塞**取键（无键时休眠等中断） |
-| 31 | `SYS_GETKEY_NB` | — | 键值 / -1 | **非阻塞**取键，无键立即返回 -1（TUI 事件循环用） |
-| 6 | `SYS_GETMOUSE` | ebx=3×int32 缓冲 | 0 / -1 | 写 x, y, buttons（bit0 左键 bit1 右键 bit2 中键） |
-| 10 | `SYS_GET_SENS` | — | 灵敏度 | 读鼠标灵敏度 |
-| 11 | `SYS_SET_SENS` | ebx=1~16 | 0 | 写鼠标灵敏度 |
-| 15 | `SYS_GET_PGLYPH` | — | 字形码 | 读指针图案 |
-| 16 | `SYS_SET_PGLYPH` | ebx=字形码 | 0 | 写指针图案（CP437，如 0xDB=█） |
+```c
+static void putchar(char c) {
+    __asm__ volatile ("int $0x80" : : "a"(1), "b"((unsigned int)c) : "memory");
+}
 
-### 文件系统（路径 = 挂载点相对路径，如 `/usb/foo.bin`）
+static int getmouse(int *x, int *y, int *buttons) {
+    unsigned int buf[3];
+    int ret;
+    __asm__ volatile ("int $0x80" : "=a"(ret) : "a"(6), "b"((unsigned int)buf) : "memory");
+    if (ret == 0) {
+        *x = (int)buf[0];
+        *y = (int)buf[1];
+        *buttons = (int)buf[2];
+    }
+    return ret;
+}
+```
 
-| 号 | 名称 | 参数 | 返回 | 说明 |
-|---|---|---|---|---|
-| 17 | `SYS_WRITE_FILE` | ebx=文件名, ecx=数据, edx=长度 | 0 / -1 | 写文件（≤64KB） |
-| 18 | `SYS_READ_FILE` | ebx=文件名, ecx=缓冲, edx=最大长度 | 字节数 / -1 | 读文件 |
-| 22 | `SYS_DELETE_FILE` | ebx=文件名 | 0 / -1 | 删除文件/空目录 |
-| 24 | `SYS_MKDIR` | ebx=路径 | 0 / -1 | 建子目录 |
-| 25 | `SYS_LIST` | ebx=路径(NULL=根), ecx=目录项数组, edx=最大数 | 项数 / -1 | 列目录 |
-| 28 | `SYS_MOUNT` | ebx=设备名, ecx=挂载点 | 0 / -1 | 挂载（如 `/usb`） |
-| 29 | `SYS_UMOUNT` | ebx=挂载点 | 0 / -1 | 卸载 |
-
-### 系统信息 / 其他
-
-| 号 | 名称 | 参数 | 返回 | 说明 |
-|---|---|---|---|---|
-| 4 | `SYS_EXIT` | ebx=状态码 | 不返回 | 终止任务 |
-| 5 | `SYS_READ_SECT` | ebx=LBA, ecx=缓冲 | 0 / 1 | 裸读扇区（演示用） |
-| 19 | `SYS_TASKS` | — | 0 | 打印任务列表 |
-| 20 | `SYS_GET_TIME` | — | (时<<16)\|(分<<8)\|秒 | 读时间 |
-| 21 | `SYS_GET_DATE` | — | ((年-2000)<<16)\|(月<<8)\|日 | 读日期 |
-| 23 | `SYS_UPTIME` | — | 秒 | 开机时长 |
-| 26 | `SYS_YIELD` | — | 不可用 | 主动让出 CPU |
-| 27 | `SYS_USB_INFO` | — | 0 | 打印 USB 设备列表 |
-| 30 | `SYS_DEVICES` | — | 0 | 打印设备/挂载表 |
+> 指针参数会被内核逐页校验（`vmm_is_user_accessible`），必须指向用户可访问内存，不能传内核地址或野指针。
 
 ## 4. 键盘特殊码（方向键）
 
