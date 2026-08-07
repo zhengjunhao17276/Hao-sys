@@ -647,13 +647,12 @@ static void cmd_ls(const char* args) {
         write("Directory not found.\n");
         return;
     }
-    if (n == 0) {
-        write("(empty)\n");
-        return;
-    }
+
+    int shown = 0;
     for (int k = 0; k < n; k++) {
         /* 跳过 '.' 和 '..' */
         if (ents[k].name[0] == 0x2E) continue;
+        shown++;
         /* 8.3 名 → 可读名：基本名去尾空格，有扩展名加点输出 */
         char disp[16];
         int d = 0;
@@ -675,6 +674,10 @@ static void cmd_ls(const char* args) {
             print_num((int)ents[k].file_size);
             write(" bytes\n");
         }
+    }
+    /* 只有 . / .. 的目录 = 空目录 */
+    if (shown == 0) {
+        write("(empty)\n");
     }
 }
 

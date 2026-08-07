@@ -84,16 +84,20 @@ write_byte "$((F1+3))" 0xFF
 # 簇分配表（Linux 风格目录布局）：
 #   簇 2   = /BIN 目录内容（含 SHELL.BIN 项）
 #   簇 3-6 = /ETC /HOME /USR /TMP 空目录内容（各 1 簇）
-#   簇 7+  = SHELL.BIN 数据
+#   簇 7   = /DEV 空目录（设备目录，Linux 风格）
+#   簇 8   = /MNT 空目录（挂载点目录）
+#   簇 9+  = SHELL.BIN 数据
 DIR_BIN=2
 DIR_ETC=3
 DIR_HOME=4
 DIR_USR=5
 DIR_TMP=6
-SHELL_START=$((7))
+DIR_DEV=7
+DIR_MNT=8
+SHELL_START=$((9))
 
 # 标记目录簇为链尾（单簇目录）
-for CL in 2 3 4 5 6; do
+for CL in 2 3 4 5 6 7 8; do
     P=$((F1 + CL * 2))
     write_byte "$P"       0xF8
     write_byte "$((P+1))" 0xFF
@@ -135,6 +139,8 @@ write_dir_entry "$((RO+32))" "ETC         " 0x10 "$DIR_ETC"
 write_dir_entry "$((RO+64))" "HOME        " 0x10 "$DIR_HOME"
 write_dir_entry "$((RO+96))" "USR         " 0x10 "$DIR_USR"
 write_dir_entry "$((RO+128))" "TMP         " 0x10 "$DIR_TMP"
+write_dir_entry "$((RO+160))" "DEV         " 0x10 "$DIR_DEV"
+write_dir_entry "$((RO+192))" "MNT         " 0x10 "$DIR_MNT"
 
 # ---------- 6. 子目录内容（. 和 .. 项） ----------
 # 每个目录簇内容：".", "..", 其余 0x00
@@ -154,8 +160,8 @@ write_dot_entries() {  # $1=目录簇内容起始偏移(字节)  $2=本簇号
 # 数据区起始扇区 = 289（簇 2）
 sec_of_cluster() { echo $((289 + (($1 - 2) * SPC))); }
 
-# 空目录内容（ETC/HOME/USR/TMP）：只有 . 和 ..
-for CL in $DIR_ETC $DIR_HOME $DIR_USR $DIR_TMP; do
+# 空目录内容（ETC/HOME/USR/TMP/DEV/MNT）：只有 . 和 ..
+for CL in $DIR_ETC $DIR_HOME $DIR_USR $DIR_TMP $DIR_DEV $DIR_MNT; do
     SEC=$(sec_of_cluster $CL)
     write_dot_entries "$((SEC * BPS))" "$CL"
 done

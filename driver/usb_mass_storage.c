@@ -334,12 +334,12 @@ void usb_mass_storage_init(void) {
         dev = dev->next;
     }
 
-    /* usb0 注册到 VFS 并自动挂载到 /usb（根挂载 / 由 kmain 在 STEP 8 做） */
+    /* /dev/usb0 注册到 VFS 并自动挂载到 /mnt/usb（根挂载 / 由 kmain 做） */
     if (msc_present) {
         usb_block_dev.sector_count = msc_sector_count;
         vfs_register_device(&usb_block_dev);
-        vga_write("[USB MSC] usb0 registered, mounting /usb...\n");
-        if (!vfs_mount("/usb", "usb0")) vga_write("[USB MSC] mount /usb failed\n");
+        vga_write("[USB MSC] /dev/usb0 registered, mounting /mnt/usb...\n");
+        if (!vfs_mount("/mnt/usb", "/dev/usb0")) vga_write("[USB MSC] mount /mnt/usb failed\n");
     }
 
     vga_write("[USB MSC] Initialization complete.\n");
@@ -348,4 +348,4 @@ void usb_mass_storage_init(void) {
 /* usb0 块设备后端（MSC bulk 传输） */
 static bool usb_blk_read(uint32_t lba, void* buf) { return usb_msc_read_sector(lba, buf) == 0; }
 static bool usb_blk_write(uint32_t lba, const void* buf) { return usb_msc_write_sector(lba, buf) == 0; }
-static block_dev_t usb_block_dev = { "usb0", usb_blk_read, usb_blk_write, 0 };
+static block_dev_t usb_block_dev = { "/dev/usb0", usb_blk_read, usb_blk_write, 0 };

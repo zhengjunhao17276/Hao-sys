@@ -30,7 +30,7 @@
 /* ata0 块设备后端 */
 static bool ata_blk_read(uint32_t lba, void* buf) { return ata_read_sector(lba, (uint8_t*)buf); }
 static bool ata_blk_write(uint32_t lba, const void* buf) { return ata_write_sector(lba, (const uint8_t*)buf); }
-static const block_dev_t ata_block_dev = { "ata0", ata_blk_read, ata_blk_write, 0 };
+static const block_dev_t ata_block_dev = { "/dev/ata0", ata_blk_read, ata_blk_write, 0 };
 
 /* @magic/info_addr 由 GRUB 传入；返回磁盘上是否有 FAT 文件系统。
  * 顺序依赖：PCI 扫描必须在 USB 之前（USB 控制器靠 PCI 发现）。 */
@@ -74,7 +74,7 @@ bool kinit(uint32_t magic, uint32_t info_addr) {
     if(ata_init(true)) {
         vga_write("[STEP 8b] FAT init...\n");
         vfs_register_device(&ata_block_dev);
-        fs_ready = vfs_mount("/", "ata0");
+        fs_ready = vfs_mount("/", "/dev/ata0");
     }
 
     vga_write("[STEP 9] Task init...\n");
