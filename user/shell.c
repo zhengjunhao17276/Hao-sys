@@ -284,6 +284,7 @@ static int strncmp(const char* a, const char* b, unsigned int n) {
 /* 命令历史（环形，最多 HIST_MAX 条） */
 #define HIST_MAX 8
 #define LINE_WIDTH 80          /* VGA 文本模式行宽（与内核 vga.h 一致） */
+#define VGA_HEIGHT 25          /* VGA 文本模式行数 */
 static char history[HIST_MAX][128];
 static int hist_count = 0;    /* 历史条数 */
 static int hist_pos = 0;      /* 0=正在编辑，>0=浏览中的历史位置 */
@@ -293,6 +294,19 @@ static int hist_pos = 0;      /* 0=正在编辑，>0=浏览中的历史位置 */
 static void line_set_cursor(int start_row, int start_col, unsigned int pos) {
     set_cursor(start_row + (start_col + (int)pos) / LINE_WIDTH,
                (start_col + (int)pos) % LINE_WIDTH);
+}
+
+/* 保证编辑行有足够显示空间：编辑行若会触底（写到 row 24 以下），
+ * 光标先跳到底行发 \n 触发内核整屏上滚（编辑行内容随之整体上移，
+ * protected_row 同步减），start_row 跟着 -1。可多次调用逐行腾空。
+ * ⚠️ 不能直接 set_cursor 越界：vga 普通字符输出在底行右角是
+ * 钳制的（TUI 修复），只有 \n 能触发 scroll。 */
+static void ensure_edit_space(int* start_row, int start_col, unsigned int len) {
+    while (*start_row + (start_col + (int)len) / LINE_WIDTH >= VGA_HEIGHT) {
+        set_cursor(VGA_HEIGHT - 1, 0);
+        putchar('\n');   /* 底行 \n → 内核 scroll() 整屏上移一行 */
+        (*start_row)--;  /* 编辑行内容整体上移了一行 */
+    }
 }
 
 /* 整行重绘：定位行首 → 重打 buf[0..len) → 行尾残留补空格 →
@@ -387,13 +401,19 @@ static unsigned int readline(char* buf, unsigned int size) {
             } else if (prev_lbtn) {
                 /* 左键抬起：与按下位置相同 = 一次点击（拖动不算） */
                 if (mx == press_x && my == press_y) {
-                    /* 点击定位：只接受当前编辑行内（提示符之后）。
+                    /* 点击定位：线性映射屏幕坐标 → 编辑行内偏移。
+                     * 编辑行可能超宽换行（占多行），所以用
+                     *   offset = (my - start_row) * 80 + (mx - start_col)
+                     * 统一映射；点击编辑行区域外（历史区/更下方）忽略。
                      * ⚠️ 历史教训（f173359）：全局跳光标会误触——
-                     * 点历史区/其他行一律忽略，光标只在编辑行内移动。 */
-                    if (my == start_row && mx >= start_col) {
-                        unsigned int click_pos = (unsigned int)(mx - start_col);
-                        if (click_pos > len) click_pos = len;   /* 行尾右侧 = 行尾 */
-                        pos = click_pos;
+                     * 只接受编辑行实际占用的屏幕行。 */
+                    int edit_last_row = start_row +
+                        (start_col + (int)len) / LINE_WIDTH;  /* 编辑行占用的最后一行 */
+                    if (my >= start_row && my <= edit_last_row) {
+                        int off = (my - start_row) * LINE_WIDTH + (mx - start_col);
+                        if (off < 0) off = 0;
+                        if (off > (int)len) off = (int)len;  /* 行尾右侧 = 行尾 */
+                        pos = (unsigned int)off;
                         line_set_cursor(start_row, start_col, pos);
                     }
                 }
@@ -413,6 +433,7 @@ static unsigned int readline(char* buf, unsigned int size) {
             /* Up：历史向前翻 */
             if (hist_count > 0 && hist_pos < hist_count) {
                 hist_pos++;
+                ensure_edit_space(&start_row, start_col, 127); /* 历史最长 127，提前腾位 */
                 len = hist_apply(buf, size, hist_pos, start_row, start_col, &disp_len);
                 pos = len;
             }
@@ -421,11 +442,13 @@ static unsigned int readline(char* buf, unsigned int size) {
             if (hist_pos > 0) {
                 hist_pos--;
                 if (hist_pos == 0) {
+                    ensure_edit_space(&start_row, start_col, 0);
                     hist_clear_line(start_row, start_col, &disp_len);
                     pos = 0;
                     len = 0;
                     buf[0] = '\0';
                 } else {
+                    ensure_edit_space(&start_row, start_col, 127);
                     len = hist_apply(buf, size, hist_pos, start_row, start_col, &disp_len);
                     pos = len;
                 }
@@ -455,6 +478,7 @@ static unsigned int readline(char* buf, unsigned int size) {
                 shift_left(buf, pos, len - pos);
                 pos--;
                 len--;
+                ensure_edit_space(&start_row, start_col, len);
                 line_redraw(start_row, start_col, buf, len, &disp_len, pos);
             }
         } else if (c >= ' ' && c <= '~') {
@@ -464,6 +488,7 @@ static unsigned int readline(char* buf, unsigned int size) {
                 buf[pos] = c;
                 pos++;
                 len++;
+                ensure_edit_space(&start_row, start_col, len);
                 line_redraw(start_row, start_col, buf, len, &disp_len, pos);
             }
             /* 缓冲区满——简单忽略 */
