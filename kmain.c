@@ -100,15 +100,15 @@ static void load_and_run_shell(void) {
     vga_write_hex(pmm_get_free_pages());
     vga_write("\n");
 
-    /* 1. 搜索 SHELL.BIN */
-    /* vfs_resolve 把 "/SHELL.BIN" 路由到根挂载（无其他前缀匹配时回退根），
-     * sub="SHELL.BIN"；fat_find_file 再把它转成 8.3（"SHELL   BIN"）匹配 */
+    /* 1. 搜索 SHELL.BIN（Linux 布局：/bin/SHELL.BIN） */
+    /* vfs_resolve 把 "/BIN/SHELL.BIN" 路由到根挂载，sub="BIN/SHELL.BIN"；
+     * fat_find_file 逐段解析子目录，最终转 8.3（"SHELL   BIN"）匹配 */
     fat_dirent_t entry;
     const char* sub = NULL;
-    fat_fs_t* root_fs = vfs_resolve("/SHELL.BIN", &sub);
+    fat_fs_t* root_fs = vfs_resolve("/BIN/SHELL.BIN", &sub);
     if (!root_fs || !fat_find_file(root_fs, sub, &entry)) {
 	/* 找不到就直接返回 */
-        vga_write("[Shell] SHELL.BIN not found.\n");
+        vga_write("[Shell] /BIN/SHELL.BIN not found.\n");
         return;
     }
     vga_write("[Shell] Found SHELL.BIN, size=");
@@ -325,7 +325,7 @@ static void load_and_run_shell(void) {
  * 决定是否加载 Shell。 */
 void kmain(uint32_t magic, uint32_t info_addr) {
     if(kinit(magic, info_addr)){
-        vga_write("[Auto] Attempting to load SHELL.BIN...\n");
+        vga_write("[Auto] Loading /BIN/SHELL.BIN...\n");
 	load_and_run_shell();
     }
     else {
