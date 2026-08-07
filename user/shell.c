@@ -1017,6 +1017,57 @@ static void tui_draw(int sel, int sens, int color_idx, int glyph_idx) {
 }
 
 /*
+ * fm_input - TUI 底栏输入框：提示 + 读一行（Enter 确认，Esc 取消）
+ * 返回输入长度（0=取消/空）；输入写入 buf（≤size-1）
+ */
+static unsigned int fm_input(const char* prompt, char* buf, unsigned int size) {
+    /* 底栏提示 */
+    set_cursor(23, 0);
+    putchar(0xC0);
+    for (int i = 1; i < 79; i++) putchar(0xC4);
+    putchar(0xD9);
+    set_cursor(23, 2);
+    write(prompt);
+
+    unsigned int len = 0;
+    buf[0] = '\0';
+    while (1) {
+        /* 回显当前输入（清残留） */
+        set_cursor(23, 2);
+        write(prompt);
+        for (unsigned int i = 0; i < len; i++) putchar(buf[i]);
+        for (unsigned int i = len; i < 40; i++) putchar(' ');
+
+        int c = getkey_nb();
+        if (c == -1) {
+            /* 与主循环一致：轮询鼠标（消费 PS/2 FIFO 鼠标字节），避免
+             * 键盘字节被鼠标字节阻塞（0x64 bit5 优先于 bit0 分流） */
+            int mx, my, mb;
+            getmouse(&mx, &my, &mb);
+            yield();
+            continue;
+        }
+        if (c == '\n' || c == '\r') {
+            buf[len] = '\0';
+            return len;
+        } else if (c == 0x1B) {
+            return 0;   /* Esc 取消 */
+        } else if (c == '\b') {
+            if (len > 0) len--;
+        } else if (c >= ' ' && c <= '~') {
+            /* 8.3 合法字符：字母（转大写）/数字/部分符号 */
+            char ch = (char)c;
+            if (ch >= 'a' && ch <= 'z') ch = ch - 'a' + 'A';  /* 转大写 */
+            if (len < size - 1 &&
+                ((ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') ||
+                 ch == '-' || ch == '_' || ch == '.')) {
+                buf[len++] = ch;
+            }
+        }
+    }
+}
+
+/*
  * fileman_tui - TUI 文件管理器（P1：单栏列表 + 鼠标/键盘导航）
  *
  * 布局：
@@ -1125,7 +1176,7 @@ static void fileman_tui(void) {
             for (int i = 1; i < 79; i++) putchar(0xC4);
             putchar(0xD9);
             set_cursor(23, 2);
-            write("Up/Down select  Enter open  Esc up  Q quit");
+            write("Up/Down sel  Enter open  Esc up  C copy  N mkdir  D del  Q quit");
 
             dirty = 0;
         }
@@ -1257,6 +1308,87 @@ static void fileman_tui(void) {
                 while (parent[k] && k < sizeof(fm_cwd) - 1) { fm_cwd[k] = parent[k]; k++; }
                 fm_cwd[k] = '\0';
                 sel = 0; scroll = 0; dirty = 1;
+            }
+        } else if (c == 'c' || c == 'C') {
+            /* 复制选中文件到当前目录（NAME.CPY） */
+            if (sel < count && !(ents[sel].attributes & 0x10)) {
+                /* 源路径 */
+                char src[80];
+                unsigned int sk = 0;
+                while (fm_cwd[sk] && sk < sizeof(src) - 1) { src[sk] = fm_cwd[sk]; sk++; }
+                if (src[sk-1] != '/') src[sk++] = '/';
+                unsigned int sn = 0;
+                while (ents[sel].name[sn] != ' ' && sn < 8 && sk < sizeof(src) - 1) { src[sk++] = (char)ents[sel].name[sn++]; }
+                if (sn > 0) src[sk++] = '.';
+                unsigned int se = 0;
+                while (ents[sel].name[8 + se] != ' ' && se < 3 && sk < sizeof(src) - 1) { src[sk++] = (char)ents[sel].name[8 + se++]; }
+                src[sk] = '\0';
+
+                /* 目标：主名（截 4 字符）+ .CPY */
+                char dst[80];
+                unsigned int dk = 0;
+                while (fm_cwd[dk] && dk < sizeof(dst) - 1) { dst[dk] = fm_cwd[dk]; dk++; }
+                if (dst[dk-1] != '/') dst[dk++] = '/';
+                unsigned int dn = 0;
+                while (ents[sel].name[dn] != ' ' && dn < 4 && dk < sizeof(dst) - 1) { dst[dk++] = (char)ents[sel].name[dn++]; }
+                dst[dk++] = '.'; dst[dk++] = 'C'; dst[dk++] = 'P'; dst[dk++] = 'Y';
+                dst[dk] = '\0';
+
+                /* 整文件复制（≤4KB，栈缓冲；read_file 不支持偏移读）
+                 * 超过 4KB 的文件拒绝复制（避免静默截断） */
+                if (ents[sel].file_size > 4096) {
+                    set_cursor(23, 2);
+                    write("Too large to copy (>4KB)");
+                    yield();
+                } else {
+                    char copy_buf[4096];
+                    int n = read_file(src, copy_buf, sizeof(copy_buf));
+                    if (n >= 0 && write_file(dst, copy_buf, (unsigned int)n) == 0) {
+                        dirty = 1;   /* 重绘列表 */
+                    }
+                }
+            }
+        } else if (c == 'n' || c == 'N') {
+            /* 新建目录：输入名字 */
+            char name[16];
+            if (fm_input("New dir name: ", name, sizeof(name)) > 0) {
+                char path[80];
+                unsigned int pk = 0;
+                while (fm_cwd[pk] && pk < sizeof(path) - 1) { path[pk] = fm_cwd[pk]; pk++; }
+                if (path[pk-1] != '/') path[pk++] = '/';
+                unsigned int pn = 0;
+                while (name[pn] && pk < sizeof(path) - 1) { path[pk++] = name[pn++]; }
+                path[pk] = '\0';
+                if (mkdir_sys(path) == 0) dirty = 1;
+            }
+            dirty = 1;   /* 刷新底栏 */
+        } else if (c == 'd' || c == 'D') {
+            /* 删除选中文件/空目录：Y 确认 */
+            if (sel < count) {
+                char path[80];
+                unsigned int pk = 0;
+                while (fm_cwd[pk] && pk < sizeof(path) - 1) { path[pk] = fm_cwd[pk]; pk++; }
+                if (path[pk-1] != '/') path[pk++] = '/';
+                unsigned int pn = 0;
+                while (ents[sel].name[pn] != ' ' && pn < 8 && pk < sizeof(path) - 1) { path[pk++] = (char)ents[sel].name[pn++]; }
+                if (pn > 0) path[pk++] = '.';
+                unsigned int pe = 0;
+                while (ents[sel].name[8 + pe] != ' ' && pe < 3 && pk < sizeof(path) - 1) { path[pk++] = (char)ents[sel].name[8 + pe++]; }
+                path[pk] = '\0';
+                /* 确认 */
+                set_cursor(23, 2);
+                write("Delete ");
+                write(path);
+                write("? (y/N) ");
+                while (1) {
+                    int k = getkey_nb();
+                    if (k == -1) { yield(); continue; }
+                    if (k == 'y' || k == 'Y') {
+                        delete_file(path);
+                    }
+                    break;
+                }
+                dirty = 1;
             }
         } else if (c == 'q' || c == 'Q') {
             break;
