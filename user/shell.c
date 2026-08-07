@@ -1017,6 +1017,261 @@ static void tui_draw(int sel, int sens, int color_idx, int glyph_idx) {
 }
 
 /*
+ * fileman_tui - TUI 文件管理器（P1：单栏列表 + 鼠标/键盘导航）
+ *
+ * 布局：
+ *   row 0   顶栏：┌─ HaoOS FM ─ <当前路径> ─┐
+ *   row 1..22  文件列表（选中行高亮）
+ *   row 23  底栏：↑↓ 选择 Enter 进入 Esc 返回 Q 退出
+ *
+ * 交互：
+ *   键盘：↑↓ 移动选中；Enter 进入目录/无操作；Esc 返回上级；Q 退出
+ *   鼠标：点击列表行选中；双击进入目录；点击顶栏/底栏无效
+ *   文件：选中 .bin 文件时底栏显示大小；目录显示 [DIR]
+ */
+static void fileman_tui(void) {
+    /* 当前目录（绝对路径，基于 shell 的 cwd） */
+    char fm_cwd[64];
+    unsigned int ci = 0;
+    while (cwd[ci] && ci < sizeof(fm_cwd) - 1) { fm_cwd[ci] = cwd[ci]; ci++; }
+    fm_cwd[ci] = '\0';
+
+    /* 目录项缓冲（最多 128 项） */
+    struct dirent ents[128];
+    int count = 0;
+    int sel = 0;             /* 当前选中项索引 */
+    int scroll = 0;          /* 列表滚动偏移（列表区 1..22，22 行） */
+    int dirty = 1;           /* 需要重绘 */
+
+    /* 鼠标点击检测状态（边沿） */
+    int prev_lbtn = 0;
+    int press_x = 0, press_y = 0;
+    int click_cnt = 0;       /* 双击计数（点不同项自动重置） */
+
+    clear_screen();
+
+    while (1) {
+        /* ---- 加载当前目录 ---- */
+        if (dirty) {
+            int raw_count = list_dir(fm_cwd[0] ? fm_cwd : NULL, ents, 128);
+            if (raw_count < 0) raw_count = 0;
+            /* 过滤掉 "."（8.3 名 ".          "，点后是空格填充；
+             * 保留 ".." 作为返回入口） */
+            count = 0;
+            for (int i = 0; i < raw_count; i++) {
+                if (ents[i].name[0] == 0x2E && (ents[i].name[1] == '\0' || ents[i].name[1] == ' ')) continue;  /* "." */
+                if (count < i) ents[count] = ents[i];
+                count++;
+            }
+            if (sel >= count) sel = count > 0 ? count - 1 : 0;
+            if (scroll > sel) scroll = sel;
+            if (sel >= scroll + 22) scroll = sel - 21;
+
+            /* 顶栏：路径 */
+            set_cursor(0, 0);
+            putchar(0xDA);
+            for (int i = 1; i < 79; i++) putchar(0xC4);
+            putchar(0xBF);
+            set_cursor(0, 2);
+            write("HaoOS FM  [");
+            write(fm_cwd);
+            write("]");
+
+            /* 列表区：先清 1..22 行 */
+            for (int r = 1; r <= 22; r++) {
+                set_cursor(r, 0);
+                for (int c = 0; c < 80; c++) putchar(' ');
+            }
+
+            /* 绘制列表 */
+            for (int r = 1; r <= 22; r++) {
+                int idx = scroll + (r - 1);
+                if (idx >= count) break;
+                set_cursor(r, 1);
+                if (idx == sel) set_color(0x70);  /* 选中：白底黑字反显 */
+                else set_color(0x0F);
+
+                if (ents[idx].attributes & 0x10) {
+                    write("[DIR] ");
+                } else {
+                    write("      ");
+                }
+                /* 8.3 名 → 可读名 */
+                char disp[16];
+                int d = 0;
+                int main_len = 8;
+                while (main_len > 0 && ents[idx].name[main_len - 1] == ' ') main_len--;
+                for (int j = 0; j < main_len; j++) disp[d++] = (char)ents[idx].name[j];
+                int ext_len = 3;
+                while (ext_len > 0 && ents[idx].name[8 + ext_len - 1] == ' ') ext_len--;
+                if (ext_len > 0) {
+                    disp[d++] = '.';
+                    for (int j = 0; j < ext_len; j++) disp[d++] = (char)ents[idx].name[8 + j];
+                }
+                disp[d] = '\0';
+                write(disp);
+                /* 文件大小 */
+                if (!(ents[idx].attributes & 0x10)) {
+                    for (int p = d; p < 20; p++) putchar(' ');
+                    print_num((int)ents[idx].file_size);
+                    write(" B");
+                }
+            }
+            set_color(0x0F);
+
+            /* 底栏 */
+            set_cursor(23, 0);
+            putchar(0xC0);
+            for (int i = 1; i < 79; i++) putchar(0xC4);
+            putchar(0xD9);
+            set_cursor(23, 2);
+            write("Up/Down select  Enter open  Esc up  Q quit");
+
+            dirty = 0;
+        }
+
+        /* ---- 鼠标轮询：点击选中 + 双击进入 ---- */
+        int mx, my, mb;
+        if (getmouse(&mx, &my, &mb) == 0) {
+            int lbtn = mb & 1;
+            if (lbtn) {
+                if (!prev_lbtn) { press_x = mx; press_y = my; }
+            } else if (prev_lbtn) {
+                if (mx == press_x && my == press_y && my >= 1 && my <= 22) {
+                    int idx = scroll + (my - 1);
+                    if (idx < count) {
+                        if (idx == sel) {
+                            /* 双击同一项 → 进入（两次点击间隔需在超时内） */
+                            click_cnt++;
+                            if (click_cnt >= 2) {
+                                click_cnt = 0;
+                                if (ents[idx].attributes & 0x10) {
+                                    /* ".." 双击 = 返回上级 */
+                                    if (ents[idx].name[0] == 0x2E && ents[idx].name[1] == 0x2E) {
+                                        if (fm_cwd[1] != '\0') {
+                                            char parent[64];
+                                            resolve_path("..", parent, sizeof(parent));
+                                            unsigned int m = 0;
+                                            while (parent[m] && m < sizeof(fm_cwd) - 1) { fm_cwd[m] = parent[m]; m++; }
+                                            fm_cwd[m] = '\0';
+                                            sel = 0; scroll = 0; dirty = 1;
+                                        }
+                                    } else {
+                                        /* 进入目录（resolve 规范化） */
+                                        char entry_name[16];
+                                        unsigned int en = 0;
+                                        while (ents[idx].name[en] != ' ' && en < 8 && en < 14) { entry_name[en] = (char)ents[idx].name[en]; en++; }
+                                        entry_name[en] = '\0';
+                                        char rel[80];
+                                        unsigned int rk = 0;
+                                        while (fm_cwd[rk] && rk < sizeof(rel) - 1) { rel[rk] = fm_cwd[rk]; rk++; }
+                                        if (rel[rk-1] != '/') rel[rk++] = '/';
+                                        unsigned int rn = 0;
+                                        while (entry_name[rn] && rk < sizeof(rel) - 1) { rel[rk++] = entry_name[rn++]; }
+                                        rel[rk] = '\0';
+                                        char norm[64];
+                                        resolve_path(rel, norm, sizeof(norm));
+                                        unsigned int m = 0;
+                                        while (norm[m] && m < sizeof(fm_cwd) - 1) { fm_cwd[m] = norm[m]; m++; }
+                                        fm_cwd[m] = '\0';
+                                        sel = 0; scroll = 0; dirty = 1;
+                                    }
+                                }
+                            }
+                        } else {
+                            sel = idx;
+                            click_cnt = 0;
+                            dirty = 1;
+                        }
+                    }
+                }
+            }
+            prev_lbtn = lbtn;
+        }
+
+        /* ---- 键盘 ---- */
+        int c = getkey_nb();
+        if (c == -1) {
+            /* 无事件：让出 CPU */
+            yield();
+            continue;
+        }
+
+        if (c == 0x01) {
+            /* Up */
+            if (sel > 0) { sel--; dirty = 1; }
+        } else if (c == 0x02) {
+            /* Down */
+            if (sel < count - 1) { sel++; dirty = 1; }
+        } else if (c == 0x03) {
+            /* Left = 返回上级 */
+            if (fm_cwd[1] != '\0') {  /* 非根目录 */
+                char parent[64];
+                resolve_path("..", parent, sizeof(parent));
+                unsigned int k = 0;
+                while (parent[k] && k < sizeof(fm_cwd) - 1) { fm_cwd[k] = parent[k]; k++; }
+                fm_cwd[k] = '\0';
+                sel = 0; scroll = 0; dirty = 1;
+            }
+        } else if (c == '\n' || c == '\r') {
+            /* Enter：进入选中目录（".." = 返回上级） */
+            if (sel < count && (ents[sel].attributes & 0x10)) {
+                /* ".." 特判：返回上级 */
+                if (ents[sel].name[0] == 0x2E && ents[sel].name[1] == 0x2E) {
+                    if (fm_cwd[1] != '\0') {
+                        char parent[64];
+                        resolve_path("..", parent, sizeof(parent));
+                        unsigned int k = 0;
+                        while (parent[k] && k < sizeof(fm_cwd) - 1) { fm_cwd[k] = parent[k]; k++; }
+                        fm_cwd[k] = '\0';
+                        sel = 0; scroll = 0; dirty = 1;
+                    }
+                    continue;
+                }
+                /* 普通目录：拼相对路径 → resolve 规范化 */
+                char entry_name[16];
+                unsigned int en = 0;
+                while (ents[sel].name[en] != ' ' && en < 8 && en < 14) { entry_name[en] = (char)ents[sel].name[en]; en++; }
+                entry_name[en] = '\0';
+                /* 先拼 fm_cwd + / + name 成相对路径，再 resolve */
+                char rel[80];
+                unsigned int rk = 0;
+                while (fm_cwd[rk] && rk < sizeof(rel) - 1) { rel[rk] = fm_cwd[rk]; rk++; }
+                if (rel[rk-1] != '/') rel[rk++] = '/';
+                unsigned int rn = 0;
+                while (entry_name[rn] && rk < sizeof(rel) - 1) { rel[rk++] = entry_name[rn++]; }
+                rel[rk] = '\0';
+                char norm[64];
+                resolve_path(rel, norm, sizeof(norm));
+                unsigned int m = 0;
+                while (norm[m] && m < sizeof(fm_cwd) - 1) { fm_cwd[m] = norm[m]; m++; }
+                fm_cwd[m] = '\0';
+                sel = 0; scroll = 0; dirty = 1;
+            }
+        } else if (c == 0x1B) {
+            /* Esc = 返回上级 */
+            if (fm_cwd[1] != '\0') {
+                char parent[64];
+                resolve_path("..", parent, sizeof(parent));
+                unsigned int k = 0;
+                while (parent[k] && k < sizeof(fm_cwd) - 1) { fm_cwd[k] = parent[k]; k++; }
+                fm_cwd[k] = '\0';
+                sel = 0; scroll = 0; dirty = 1;
+            }
+        } else if (c == 'q' || c == 'Q') {
+            break;
+        }
+    }
+
+    /* 退出：清屏 + 同步 cwd 到 shell */
+    clear_screen();
+    unsigned int k = 0;
+    while (fm_cwd[k] && k < sizeof(cwd) - 1) { cwd[k] = fm_cwd[k]; k++; }
+    cwd[k] = '\0';
+    set_cursor(24, 0);
+}
+
+/*
  * settings_tui - 全屏设置界面
  *
  * 支持：
@@ -1078,6 +1333,11 @@ static void cmd_settings(const char* args) { (void)args;
     settings_tui();
 }
 
+/* cmd_fm - TUI 文件管理器入口 */
+static void cmd_fm(const char* args) { (void)args;
+    fileman_tui();
+}
+
 /* ---- 命令表 ---- */
 typedef struct {
     const char* name;       /* 命令名 */
@@ -1108,6 +1368,7 @@ static command_t commands[] = {
     { "usb",   cmd_usb },
     { "settings", cmd_settings },
     { "set",   cmd_settings },
+    { "fm",    cmd_fm },
     { "exit",  cmd_exit },
     { NULL,    NULL }
 };
