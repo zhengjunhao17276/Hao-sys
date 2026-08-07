@@ -1567,6 +1567,9 @@ void main(void) {
     write("HaoOS Shell v0.1\n");
     write("Type 'help' for commands.\n");
 
+    /* 默认进入 TUI 文件管理器（Q 退出后落回 shell 提示符） */
+    fileman_tui();
+
     while (1) {
         /* 输出提示符（含当前目录），并锁定编辑区：
          * 文本光标（含鼠标左键放置）只能在提示行及以下移动，
