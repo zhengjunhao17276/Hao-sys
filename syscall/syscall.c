@@ -26,6 +26,13 @@ int sys_getchar(void) {
     return (int)keyboard_get_char();
 }
 
+/* 非阻塞取键：有键立即返回键值，无键返回 -1（TUI 事件循环轮询用）
+ * ⚠️ 不用 keyboard_have_key()：键盘 IRQ 被屏蔽（纯轮询模式），
+ * 环形缓冲只有阻塞版 get_char 才填充；这里直接轮询端口。 */
+int sys_getkey_nb(void) {
+    return (int)keyboard_get_char_nb();
+}
+
 /* 用户指针必须先验 PAGE_USER，否则恶意程序能骗内核读任意内存。
  * 逐页校验，最多 4096 字节。 */
 int sys_write(const char *str) {
@@ -413,6 +420,10 @@ void syscall_dispatcher(regs_t *regs) {
 
         case SYS_DEVICES:
             ret = sys_devices();
+            break;
+
+        case SYS_GETKEY_NB:
+            ret = sys_getkey_nb();
             break;
 
         default:

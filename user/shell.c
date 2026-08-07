@@ -33,6 +33,7 @@
 #define SYS_MOUNT      28  /* 挂载设备（ebx=设备名, ecx=挂载点） */
 #define SYS_UMOUNT     29  /* 卸载（ebx=挂载点） */
 #define SYS_DEVICES    30  /* 打印设备/挂载表 */
+#define SYS_GETKEY_NB  31  /* 非阻塞取键：有键返回键值，无键返回 -1 */
 
 /* FAT 目录项（与内核 fat_dirent_t 布局一致，32 字节） */
 struct dirent {
@@ -71,6 +72,13 @@ static char getchar(void) {
     char c;
     __asm__ volatile ("int $0x80" : "=a"(c) : "a"(2) : "memory");
     return c;
+}
+
+/* getkey_nb - 非阻塞取键：有键返回键值，无键返回 -1（TUI 事件循环用） */
+static int getkey_nb(void) {
+    int r;
+    __asm__ volatile ("int $0x80" : "=a"(r) : "a"(SYS_GETKEY_NB) : "memory");
+    return r;
 }
 
 /* write - 通过系统调用输出字符串 */
@@ -352,7 +360,8 @@ static void hist_add(const char* line) {
 }
 
 /* 读一行：字符插入光标处、←→ 移光标、Backspace 删光标前字符、
- * ↑↓ 翻历史、Enter 返回。返回行长度。 */
+ * ↑↓ 翻历史、鼠标点击编辑行内定位光标、Enter 返回。
+ * 事件循环：非阻塞取键 + 鼠标边沿检测（按下→抬起且位置不变=点击）。 */
 static unsigned int readline(char* buf, unsigned int size) {
     unsigned int pos = 0;      /* 光标位置（buf 内偏移） */
     unsigned int len = 0;      /* 行长度 */
@@ -364,8 +373,41 @@ static unsigned int readline(char* buf, unsigned int size) {
     int start_row = (int)(cur >> 16);
     int start_col = (int)(cur & 0xFFFF);
 
+    /* 鼠标点击边沿检测状态：上一帧左键状态 + 按下时的位置 */
+    int prev_lbtn = 0;
+    int press_x = 0, press_y = 0;
+
     while (1) {
-        char c = getchar();
+        /* ---- 鼠标轮询：点击边沿检测 ---- */
+        int mx, my, mb;
+        if (getmouse(&mx, &my, &mb) == 0) {
+            if (mb & 1) {
+                /* 左键按下：记录按下位置（只记一次，按住不重复记） */
+                if (!prev_lbtn) { press_x = mx; press_y = my; }
+            } else if (prev_lbtn) {
+                /* 左键抬起：与按下位置相同 = 一次点击（拖动不算） */
+                if (mx == press_x && my == press_y) {
+                    /* 点击定位：只接受当前编辑行内（提示符之后）。
+                     * ⚠️ 历史教训（f173359）：全局跳光标会误触——
+                     * 点历史区/其他行一律忽略，光标只在编辑行内移动。 */
+                    if (my == start_row && mx >= start_col) {
+                        unsigned int click_pos = (unsigned int)(mx - start_col);
+                        if (click_pos > len) click_pos = len;   /* 行尾右侧 = 行尾 */
+                        pos = click_pos;
+                        line_set_cursor(start_row, start_col, pos);
+                    }
+                }
+            }
+            prev_lbtn = mb & 1;
+        }
+
+        /* ---- 键盘：非阻塞取键 ---- */
+        int c = getkey_nb();
+        if (c == -1) {
+            /* 无键无点击：让出 CPU（抢占式调度会按时唤醒，不忙转） */
+            yield();
+            continue;
+        }
 
         if (c == 0x01) {
             /* Up：历史向前翻 */

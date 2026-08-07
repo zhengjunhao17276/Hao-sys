@@ -162,6 +162,63 @@ void keyboard_init(void) {
 }
 
 
+/* 非阻塞取键：有键立即返回键值（含方向键特殊码 0x01-0x04），无键返回 -1。
+ * ⚠️ 键盘 IRQ 被屏蔽（纯轮询模式），ps2_buffer 只有 keyboard_get_char()
+ * 的读空循环才填充——本函数直接轮询 0x64/0x60 端口：
+ *   bit5（AUX）= 鼠标字节 → 喂鼠标解析器（保状态最新）
+ *   bit0（OBF）= 键盘字节 → 转 ASCII 返回
+ * 一次只处理一个字节（非阻塞，TUI 事件循环每轮调一次）。 */
+char keyboard_get_char_nb(void) {
+    /* 先查环形缓冲（IRQ 或上次轮询残留） */
+    if (ps2_head != ps2_tail) {
+        uint8_t sc = ps2_buffer[ps2_head];
+        ps2_head = (ps2_head + 1) % PS2_BUFFER_SIZE;
+        if (!(sc & 0x80)) {
+            switch (sc) {
+                case 0x48: return 0x01;   /* Up */
+                case 0x50: return 0x02;   /* Down */
+                case 0x4B: return 0x03;   /* Left */
+                case 0x4D: return 0x04;   /* Right */
+                default: break;
+            }
+        }
+        char c = ps2_scancode_to_ascii(sc);
+        if (c) return c;
+        return -1;   /* 修饰键/释放事件，无字符 */
+    }
+
+    /* USB 键盘（非阻塞轮询） */
+    usb_keyboard_poll();
+    if (usb_keyboard_has_char()) {
+        char c = usb_keyboard_get_char();
+        if (c) return c;
+        return -1;
+    }
+
+    /* 轮询 PS/2 输出缓冲：先查状态寄存器 */
+    uint8_t st = inb(0x64);
+    if (st & 0x20) {
+        /* 鼠标数据 → 喂解析器 */
+        mouse_feed_byte(inb(0x60));
+        return -1;
+    }
+    if (st & 0x01) {
+        uint8_t sc = inb(0x60);
+        if (!(sc & 0x80)) {
+            switch (sc) {
+                case 0x48: return 0x01;   /* Up */
+                case 0x50: return 0x02;   /* Down */
+                case 0x4B: return 0x03;   /* Left */
+                case 0x4D: return 0x04;   /* Right */
+                default: break;
+            }
+        }
+        char c = ps2_scancode_to_ascii(sc);
+        if (c) return c;
+    }
+    return -1;
+}
+
 /* PS/2 或 USB 是否有按键待处理 */
 bool keyboard_have_key(void) {
     if (ps2_head != ps2_tail) return true;
