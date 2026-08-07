@@ -1089,18 +1089,28 @@ static unsigned int fm_input(const char* prompt, char* buf, unsigned int size) {
  *   文件：选中 .bin 文件时底栏显示大小；目录显示 [DIR]
  */
 static void fileman_tui(void) {
-    /* 当前目录（绝对路径，基于 shell 的 cwd） */
-    char fm_cwd[64];
-    unsigned int ci = 0;
-    while (cwd[ci] && ci < sizeof(fm_cwd) - 1) { fm_cwd[ci] = cwd[ci]; ci++; }
-    fm_cwd[ci] = '\0';
+    /* 栏状态：左右两栏各自独立（MC 双栏） */
+    struct {
+        char cwd[64];          /* 栏当前目录 */
+        struct dirent ents[128];
+        int count;
+        int sel;
+        int scroll;
+        int dirty;
+    } panes[2];
+    int active = 0;            /* 活动栏：0=左 1=右 */
 
-    /* 目录项缓冲（最多 128 项） */
-    struct dirent ents[128];
-    int count = 0;
-    int sel = 0;             /* 当前选中项索引 */
-    int scroll = 0;          /* 列表滚动偏移（列表区 1..22，22 行） */
-    int dirty = 1;           /* 需要重绘 */
+    /* 初始化：左栏 = shell 当前目录，右栏 = 根目录 */
+    unsigned int ci = 0;
+    while (cwd[ci] && ci < sizeof(panes[0].cwd) - 1) { panes[0].cwd[ci] = cwd[ci]; ci++; }
+    panes[0].cwd[ci] = '\0';
+    panes[1].cwd[0] = '/'; panes[1].cwd[1] = '\0';
+    for (int p = 0; p < 2; p++) {
+        panes[p].count = 0;
+        panes[p].sel = 0;
+        panes[p].scroll = 0;
+        panes[p].dirty = 1;
+    }
 
     /* 鼠标点击检测状态（边沿） */
     int prev_lbtn = 0;
@@ -1110,70 +1120,80 @@ static void fileman_tui(void) {
     clear_screen();
 
     while (1) {
-        /* ---- 加载当前目录 ---- */
-        if (dirty) {
-            int raw_count = list_dir(fm_cwd[0] ? fm_cwd : NULL, ents, 128);
-            if (raw_count < 0) raw_count = 0;
-            /* 过滤掉 "."（8.3 名 ".          "，点后是空格填充；
-             * 保留 ".." 作为返回入口） */
-            count = 0;
-            for (int i = 0; i < raw_count; i++) {
-                if (ents[i].name[0] == 0x2E && (ents[i].name[1] == '\0' || ents[i].name[1] == ' ')) continue;  /* "." */
-                if (count < i) ents[count] = ents[i];
-                count++;
+        /* ---- 双栏加载 + 绘制（任一栏 dirty 时全量重绘） ---- */
+        int need_draw = panes[0].dirty || panes[1].dirty;
+        if (need_draw) {
+            for (int p = 0; p < 2; p++) {
+                /* 加载当前目录（过滤 "."，保留 ".."） */
+                int raw_count = list_dir(panes[p].cwd[0] ? panes[p].cwd : NULL,
+                                         panes[p].ents, 128);
+                if (raw_count < 0) raw_count = 0;
+                panes[p].count = 0;
+                for (int i = 0; i < raw_count; i++) {
+                    if (panes[p].ents[i].name[0] == 0x2E &&
+                        (panes[p].ents[i].name[1] == '\0' || panes[p].ents[i].name[1] == ' ')) continue;
+                    if (panes[p].count < i) panes[p].ents[panes[p].count] = panes[p].ents[i];
+                    panes[p].count++;
+                }
+                if (panes[p].sel >= panes[p].count) panes[p].sel = panes[p].count > 0 ? panes[p].count - 1 : 0;
+                if (panes[p].scroll > panes[p].sel) panes[p].scroll = panes[p].sel;
+                if (panes[p].sel >= panes[p].scroll + 22) panes[p].scroll = panes[p].sel - 21;
             }
-            if (sel >= count) sel = count > 0 ? count - 1 : 0;
-            if (scroll > sel) scroll = sel;
-            if (sel >= scroll + 22) scroll = sel - 21;
 
-            /* 顶栏：路径 */
+            /* 顶栏：两栏路径（左栏高亮活动色） */
             set_cursor(0, 0);
             putchar(0xDA);
             for (int i = 1; i < 79; i++) putchar(0xC4);
             putchar(0xBF);
-            set_cursor(0, 2);
-            write("HaoOS FM  [");
-            write(fm_cwd);
-            write("]");
+            set_cursor(0, 1);
+            write(active == 0 ? ">>" : "  ");
+            write(panes[0].cwd);
+            set_cursor(0, 41);
+            write(active == 1 ? ">>" : "  ");
+            write(panes[1].cwd);
 
-            /* 列表区：先清 1..22 行 */
+            /* 中间分隔线（col 39） */
             for (int r = 1; r <= 22; r++) {
-                set_cursor(r, 0);
-                for (int c = 0; c < 80; c++) putchar(' ');
+                set_cursor(r, 39);
+                putchar(0xB3);
             }
 
-            /* 绘制列表 */
-            for (int r = 1; r <= 22; r++) {
-                int idx = scroll + (r - 1);
-                if (idx >= count) break;
-                set_cursor(r, 1);
-                if (idx == sel) set_color(0x70);  /* 选中：白底黑字反显 */
-                else set_color(0x0F);
+            /* 列表区清空 + 绘制两栏 */
+            for (int p = 0; p < 2; p++) {
+                int x0 = (p == 0) ? 1 : 41;
+                for (int r = 1; r <= 22; r++) {
+                    set_cursor(r, x0);
+                    for (int c = 0; c < 38; c++) putchar(' ');
+                }
+                for (int r = 1; r <= 22; r++) {
+                    int idx = panes[p].scroll + (r - 1);
+                    if (idx >= panes[p].count) break;
+                    set_cursor(r, x0);
+                    if (idx == panes[p].sel) set_color(p == active ? 0x70 : 0x30);
+                    else set_color(0x0F);
 
-                if (ents[idx].attributes & 0x10) {
-                    write("[DIR] ");
-                } else {
-                    write("      ");
-                }
-                /* 8.3 名 → 可读名 */
-                char disp[16];
-                int d = 0;
-                int main_len = 8;
-                while (main_len > 0 && ents[idx].name[main_len - 1] == ' ') main_len--;
-                for (int j = 0; j < main_len; j++) disp[d++] = (char)ents[idx].name[j];
-                int ext_len = 3;
-                while (ext_len > 0 && ents[idx].name[8 + ext_len - 1] == ' ') ext_len--;
-                if (ext_len > 0) {
-                    disp[d++] = '.';
-                    for (int j = 0; j < ext_len; j++) disp[d++] = (char)ents[idx].name[8 + j];
-                }
-                disp[d] = '\0';
-                write(disp);
-                /* 文件大小 */
-                if (!(ents[idx].attributes & 0x10)) {
-                    for (int p = d; p < 20; p++) putchar(' ');
-                    print_num((int)ents[idx].file_size);
-                    write(" B");
+                    if (panes[p].ents[idx].attributes & 0x10) write("[D] ");
+                    else write("    ");
+                    /* 8.3 名 → 可读名 */
+                    char disp[16];
+                    int d = 0;
+                    int main_len = 8;
+                    while (main_len > 0 && panes[p].ents[idx].name[main_len - 1] == ' ') main_len--;
+                    for (int j = 0; j < main_len; j++) disp[d++] = (char)panes[p].ents[idx].name[j];
+                    int ext_len = 3;
+                    while (ext_len > 0 && panes[p].ents[idx].name[8 + ext_len - 1] == ' ') ext_len--;
+                    if (ext_len > 0) {
+                        disp[d++] = '.';
+                        for (int j = 0; j < ext_len; j++) disp[d++] = (char)panes[p].ents[idx].name[8 + j];
+                    }
+                    disp[d] = '\0';
+                    write(disp);
+                    /* 文件大小（右对齐到栏宽） */
+                    if (!(panes[p].ents[idx].attributes & 0x10)) {
+                        for (int sp = d; sp < 22; sp++) putchar(' ');
+                        print_num((int)panes[p].ents[idx].file_size);
+                        write("B");
+                    }
                 }
             }
             set_color(0x0F);
@@ -1184,12 +1204,12 @@ static void fileman_tui(void) {
             for (int i = 1; i < 79; i++) putchar(0xC4);
             putchar(0xD9);
             set_cursor(23, 2);
-            write("Up/Down sel  Enter open  Esc up  C copy  N mkdir  D del  Q quit");
+            write("Tab swap  Up/Down sel  Enter open  Esc up  C copy  N mkdir  D del  Q quit");
 
-            dirty = 0;
+            panes[0].dirty = panes[1].dirty = 0;
         }
 
-        /* ---- 鼠标轮询：点击选中 + 双击进入 ---- */
+        /* ---- 鼠标轮询：点击选中 + 双击进入（活动栏） ---- */
         int mx, my, mb;
         if (getmouse(&mx, &my, &mb) == 0) {
             int lbtn = mb & 1;
@@ -1197,50 +1217,44 @@ static void fileman_tui(void) {
                 if (!prev_lbtn) { press_x = mx; press_y = my; }
             } else if (prev_lbtn) {
                 if (mx == press_x && my == press_y && my >= 1 && my <= 22) {
-                    int idx = scroll + (my - 1);
-                    if (idx < count) {
-                        if (idx == sel) {
-                            /* 双击同一项 → 进入（两次点击间隔需在超时内） */
+                    /* 判断点击哪一栏 */
+                    int pane = (mx < 39) ? 0 : 1;
+                    int idx = panes[pane].scroll + (my - 1);
+                    if (idx < panes[pane].count) {
+                        if (pane != active) {
+                            active = pane;
+                            panes[0].dirty = panes[1].dirty = 1;
+                        } else if (idx == panes[pane].sel) {
+                            /* 双击同一项 → 进入 */
                             click_cnt++;
                             if (click_cnt >= 2) {
                                 click_cnt = 0;
-                                if (ents[idx].attributes & 0x10) {
-                                    /* ".." 双击 = 返回上级 */
-                                    if (ents[idx].name[0] == 0x2E && ents[idx].name[1] == 0x2E) {
-                                        if (fm_cwd[1] != '\0') {
-                                            char parent[64];
-                                            resolve_path("..", parent, sizeof(parent));
-                                            unsigned int m = 0;
-                                            while (parent[m] && m < sizeof(fm_cwd) - 1) { fm_cwd[m] = parent[m]; m++; }
-                                            fm_cwd[m] = '\0';
-                                            sel = 0; scroll = 0; dirty = 1;
-                                        }
-                                    } else {
-                                        /* 进入目录（resolve 规范化） */
-                                        char entry_name[16];
-                                        unsigned int en = 0;
-                                        while (ents[idx].name[en] != ' ' && en < 8 && en < 14) { entry_name[en] = (char)ents[idx].name[en]; en++; }
-                                        entry_name[en] = '\0';
-                                        char rel[80];
-                                        unsigned int rk = 0;
-                                        while (fm_cwd[rk] && rk < sizeof(rel) - 1) { rel[rk] = fm_cwd[rk]; rk++; }
-                                        if (rel[rk-1] != '/') rel[rk++] = '/';
-                                        unsigned int rn = 0;
-                                        while (entry_name[rn] && rk < sizeof(rel) - 1) { rel[rk++] = entry_name[rn++]; }
-                                        rel[rk] = '\0';
-                                        char norm[64];
-                                        resolve_path(rel, norm, sizeof(norm));
-                                        unsigned int m = 0;
-                                        while (norm[m] && m < sizeof(fm_cwd) - 1) { fm_cwd[m] = norm[m]; m++; }
-                                        fm_cwd[m] = '\0';
-                                        sel = 0; scroll = 0; dirty = 1;
-                                    }
+                                if (panes[pane].ents[idx].attributes & 0x10) {
+                                    char entry_name[16];
+                                    unsigned int en = 0;
+                                    while (panes[pane].ents[idx].name[en] != ' ' && en < 8 && en < 14) { entry_name[en] = (char)panes[pane].ents[idx].name[en]; en++; }
+                                    entry_name[en] = '\0';
+                                    /* ".." = 返回上级 */
+                                    char rel[80];
+                                    unsigned int rk = 0;
+                                    while (panes[pane].cwd[rk] && rk < sizeof(rel) - 1) { rel[rk] = panes[pane].cwd[rk]; rk++; }
+                                    if (rel[rk-1] != '/') rel[rk++] = '/';
+                                    unsigned int rn = 0;
+                                    while (entry_name[rn] && rk < sizeof(rel) - 1) { rel[rk++] = entry_name[rn++]; }
+                                    rel[rk] = '\0';
+                                    char norm[64];
+                                    resolve_path(rel, norm, sizeof(norm));
+                                    unsigned int m2 = 0;
+                                    while (norm[m2] && m2 < sizeof(panes[pane].cwd) - 1) { panes[pane].cwd[m2] = norm[m2]; m2++; }
+                                    panes[pane].cwd[m2] = '\0';
+                                    panes[pane].sel = 0; panes[pane].scroll = 0;
+                                    panes[pane].dirty = 1;
                                 }
                             }
                         } else {
-                            sel = idx;
+                            panes[pane].sel = idx;
                             click_cnt = 0;
-                            dirty = 1;
+                            panes[pane].dirty = 1;
                         }
                     }
                 }
@@ -1251,107 +1265,93 @@ static void fileman_tui(void) {
         /* ---- 键盘 ---- */
         int c = getkey_nb();
         if (c == -1) {
-            /* 无事件：让出 CPU */
             yield();
             continue;
         }
 
-        if (c == 0x01) {
+        if (c == '\t') {
+            /* Tab：切换活动栏 */
+            active = 1 - active;
+            panes[0].dirty = panes[1].dirty = 1;
+        } else if (c == 0x01) {
             /* Up */
-            if (sel > 0) { sel--; dirty = 1; }
+            if (panes[active].sel > 0) { panes[active].sel--; panes[active].dirty = 1; }
         } else if (c == 0x02) {
             /* Down */
-            if (sel < count - 1) { sel++; dirty = 1; }
+            if (panes[active].sel < panes[active].count - 1) { panes[active].sel++; panes[active].dirty = 1; }
         } else if (c == 0x03) {
             /* Left = 返回上级 */
-            if (fm_cwd[1] != '\0') {  /* 非根目录 */
+            if (panes[active].cwd[1] != '\0') {
                 char parent[64];
                 resolve_path("..", parent, sizeof(parent));
                 unsigned int k = 0;
-                while (parent[k] && k < sizeof(fm_cwd) - 1) { fm_cwd[k] = parent[k]; k++; }
-                fm_cwd[k] = '\0';
-                sel = 0; scroll = 0; dirty = 1;
+                while (parent[k] && k < sizeof(panes[active].cwd) - 1) { panes[active].cwd[k] = parent[k]; k++; }
+                panes[active].cwd[k] = '\0';
+                panes[active].sel = 0; panes[active].scroll = 0; panes[active].dirty = 1;
             }
         } else if (c == '\n' || c == '\r') {
             /* Enter：进入选中目录（".." = 返回上级） */
-            if (sel < count && (ents[sel].attributes & 0x10)) {
-                /* ".." 特判：返回上级 */
-                if (ents[sel].name[0] == 0x2E && ents[sel].name[1] == 0x2E) {
-                    if (fm_cwd[1] != '\0') {
-                        char parent[64];
-                        resolve_path("..", parent, sizeof(parent));
-                        unsigned int k = 0;
-                        while (parent[k] && k < sizeof(fm_cwd) - 1) { fm_cwd[k] = parent[k]; k++; }
-                        fm_cwd[k] = '\0';
-                        sel = 0; scroll = 0; dirty = 1;
-                    }
-                    continue;
-                }
-                /* 普通目录：拼相对路径 → resolve 规范化 */
+            int p = active;
+            if (panes[p].sel < panes[p].count && (panes[p].ents[panes[p].sel].attributes & 0x10)) {
                 char entry_name[16];
                 unsigned int en = 0;
-                while (ents[sel].name[en] != ' ' && en < 8 && en < 14) { entry_name[en] = (char)ents[sel].name[en]; en++; }
+                while (panes[p].ents[panes[p].sel].name[en] != ' ' && en < 8 && en < 14) { entry_name[en] = (char)panes[p].ents[panes[p].sel].name[en]; en++; }
                 entry_name[en] = '\0';
-                /* 先拼 fm_cwd + / + name 成相对路径，再 resolve */
                 char rel[80];
                 unsigned int rk = 0;
-                while (fm_cwd[rk] && rk < sizeof(rel) - 1) { rel[rk] = fm_cwd[rk]; rk++; }
+                while (panes[p].cwd[rk] && rk < sizeof(rel) - 1) { rel[rk] = panes[p].cwd[rk]; rk++; }
                 if (rel[rk-1] != '/') rel[rk++] = '/';
                 unsigned int rn = 0;
                 while (entry_name[rn] && rk < sizeof(rel) - 1) { rel[rk++] = entry_name[rn++]; }
                 rel[rk] = '\0';
                 char norm[64];
                 resolve_path(rel, norm, sizeof(norm));
-                unsigned int m = 0;
-                while (norm[m] && m < sizeof(fm_cwd) - 1) { fm_cwd[m] = norm[m]; m++; }
-                fm_cwd[m] = '\0';
-                sel = 0; scroll = 0; dirty = 1;
+                unsigned int m2 = 0;
+                while (norm[m2] && m2 < sizeof(panes[p].cwd) - 1) { panes[p].cwd[m2] = norm[m2]; m2++; }
+                panes[p].cwd[m2] = '\0';
+                panes[p].sel = 0; panes[p].scroll = 0; panes[p].dirty = 1;
             }
         } else if (c == 0x1B) {
             /* Esc = 返回上级 */
-            if (fm_cwd[1] != '\0') {
+            if (panes[active].cwd[1] != '\0') {
                 char parent[64];
                 resolve_path("..", parent, sizeof(parent));
                 unsigned int k = 0;
-                while (parent[k] && k < sizeof(fm_cwd) - 1) { fm_cwd[k] = parent[k]; k++; }
-                fm_cwd[k] = '\0';
-                sel = 0; scroll = 0; dirty = 1;
+                while (parent[k] && k < sizeof(panes[active].cwd) - 1) { panes[active].cwd[k] = parent[k]; k++; }
+                panes[active].cwd[k] = '\0';
+                panes[active].sel = 0; panes[active].scroll = 0; panes[active].dirty = 1;
             }
         } else if (c == 'c' || c == 'C') {
-            /* 复制选中文件到当前目录（NAME.CPY） */
-            if (sel < count && !(ents[sel].attributes & 0x10)) {
-                /* 源路径 */
+            /* 复制选中文件到活动栏当前目录（NAME.CPY） */
+            int p = active;
+            if (panes[p].sel < panes[p].count && !(panes[p].ents[panes[p].sel].attributes & 0x10)) {
                 char src[80];
                 unsigned int sk = 0;
-                while (fm_cwd[sk] && sk < sizeof(src) - 1) { src[sk] = fm_cwd[sk]; sk++; }
+                while (panes[p].cwd[sk] && sk < sizeof(src) - 1) { src[sk] = panes[p].cwd[sk]; sk++; }
                 if (src[sk-1] != '/') src[sk++] = '/';
                 unsigned int sn = 0;
-                while (ents[sel].name[sn] != ' ' && sn < 8 && sk < sizeof(src) - 1) { src[sk++] = (char)ents[sel].name[sn++]; }
+                while (panes[p].ents[panes[p].sel].name[sn] != ' ' && sn < 8 && sk < sizeof(src) - 1) { src[sk++] = (char)panes[p].ents[panes[p].sel].name[sn++]; }
                 if (sn > 0) src[sk++] = '.';
                 unsigned int se = 0;
-                while (ents[sel].name[8 + se] != ' ' && se < 3 && sk < sizeof(src) - 1) { src[sk++] = (char)ents[sel].name[8 + se++]; }
+                while (panes[p].ents[panes[p].sel].name[8 + se] != ' ' && se < 3 && sk < sizeof(src) - 1) { src[sk++] = (char)panes[p].ents[panes[p].sel].name[8 + se++]; }
                 src[sk] = '\0';
 
-                /* 目标：主名（截 4 字符）+ .CPY */
                 char dst[80];
                 unsigned int dk = 0;
-                while (fm_cwd[dk] && dk < sizeof(dst) - 1) { dst[dk] = fm_cwd[dk]; dk++; }
+                while (panes[p].cwd[dk] && dk < sizeof(dst) - 1) { dst[dk] = panes[p].cwd[dk]; dk++; }
                 if (dst[dk-1] != '/') dst[dk++] = '/';
                 unsigned int dn = 0;
-                while (ents[sel].name[dn] != ' ' && dn < 4 && dk < sizeof(dst) - 1) { dst[dk++] = (char)ents[sel].name[dn++]; }
+                while (panes[p].ents[panes[p].sel].name[dn] != ' ' && dn < 4 && dk < sizeof(dst) - 1) { dst[dk++] = (char)panes[p].ents[panes[p].sel].name[dn++]; }
                 dst[dk++] = '.'; dst[dk++] = 'C'; dst[dk++] = 'P'; dst[dk++] = 'Y';
                 dst[dk] = '\0';
 
-                /* 整文件复制：分块读（read_file_off 带偏移）进 static 缓冲，
-                 * 再整写。static 在 .bss（已映射 64KB），留余量用 60KB */
                 static char copy_buf[61440];
-                unsigned int fsize = ents[sel].file_size;
+                unsigned int fsize = panes[p].ents[panes[p].sel].file_size;
                 if (fsize > sizeof(copy_buf)) {
                     set_cursor(23, 2);
-                    write("Too large to copy (>64KB)");
+                    write("Too large to copy (>60KB)");
                     yield();
                 } else {
-                    /* 分块读入 copy_buf */
                     unsigned int got = 0;
                     int ok = 1;
                     while (got < fsize) {
@@ -1360,41 +1360,41 @@ static void fileman_tui(void) {
                         int n = read_file_off(src, got, copy_buf + got, want);
                         if (n <= 0) { ok = 0; break; }
                         got += (unsigned int)n;
-                        if ((unsigned int)n < want) break;   /* 读尽 */
+                        if ((unsigned int)n < want) break;
                     }
                     if (ok && write_file(dst, copy_buf, got) == 0) {
-                        dirty = 1;   /* 重绘列表 */
+                        panes[p].dirty = 1;
                     }
                 }
             }
         } else if (c == 'n' || c == 'N') {
-            /* 新建目录：输入名字 */
+            /* 新建目录到活动栏当前目录 */
             char name[16];
             if (fm_input("New dir name: ", name, sizeof(name)) > 0) {
                 char path[80];
                 unsigned int pk = 0;
-                while (fm_cwd[pk] && pk < sizeof(path) - 1) { path[pk] = fm_cwd[pk]; pk++; }
+                while (panes[active].cwd[pk] && pk < sizeof(path) - 1) { path[pk] = panes[active].cwd[pk]; pk++; }
                 if (path[pk-1] != '/') path[pk++] = '/';
                 unsigned int pn = 0;
                 while (name[pn] && pk < sizeof(path) - 1) { path[pk++] = name[pn++]; }
                 path[pk] = '\0';
-                if (mkdir_sys(path) == 0) dirty = 1;
+                if (mkdir_sys(path) == 0) panes[active].dirty = 1;
             }
-            dirty = 1;   /* 刷新底栏 */
+            panes[active].dirty = 1;
         } else if (c == 'd' || c == 'D') {
-            /* 删除选中文件/空目录：Y 确认 */
-            if (sel < count) {
+            /* 删除活动栏选中项：Y 确认 */
+            int p = active;
+            if (panes[p].sel < panes[p].count) {
                 char path[80];
                 unsigned int pk = 0;
-                while (fm_cwd[pk] && pk < sizeof(path) - 1) { path[pk] = fm_cwd[pk]; pk++; }
+                while (panes[p].cwd[pk] && pk < sizeof(path) - 1) { path[pk] = panes[p].cwd[pk]; pk++; }
                 if (path[pk-1] != '/') path[pk++] = '/';
                 unsigned int pn = 0;
-                while (ents[sel].name[pn] != ' ' && pn < 8 && pk < sizeof(path) - 1) { path[pk++] = (char)ents[sel].name[pn++]; }
+                while (panes[p].ents[panes[p].sel].name[pn] != ' ' && pn < 8 && pk < sizeof(path) - 1) { path[pk++] = (char)panes[p].ents[panes[p].sel].name[pn++]; }
                 if (pn > 0) path[pk++] = '.';
                 unsigned int pe = 0;
-                while (ents[sel].name[8 + pe] != ' ' && pe < 3 && pk < sizeof(path) - 1) { path[pk++] = (char)ents[sel].name[8 + pe++]; }
+                while (panes[p].ents[panes[p].sel].name[8 + pe] != ' ' && pe < 3 && pk < sizeof(path) - 1) { path[pk++] = (char)panes[p].ents[panes[p].sel].name[8 + pe++]; }
                 path[pk] = '\0';
-                /* 确认 */
                 set_cursor(23, 2);
                 write("Delete ");
                 write(path);
@@ -1407,17 +1407,17 @@ static void fileman_tui(void) {
                     }
                     break;
                 }
-                dirty = 1;
+                panes[p].dirty = 1;
             }
         } else if (c == 'q' || c == 'Q') {
             break;
         }
     }
 
-    /* 退出：清屏 + 同步 cwd 到 shell */
+    /* 退出：清屏 + 同步 cwd 到 shell（活动栏目录） */
     clear_screen();
     unsigned int k = 0;
-    while (fm_cwd[k] && k < sizeof(cwd) - 1) { cwd[k] = fm_cwd[k]; k++; }
+    while (panes[active].cwd[k] && k < sizeof(cwd) - 1) { cwd[k] = panes[active].cwd[k]; k++; }
     cwd[k] = '\0';
     set_cursor(24, 0);
 }
