@@ -499,7 +499,58 @@ static unsigned int readline(char* buf, unsigned int size) {
 
 /* ---- 命令实现 ---- */
 
-/* cmd_help - 显示帮助信息 */
+/* 当前工作目录（Linux 风格，/ 开头）；文件命令相对路径基于它 */
+static char cwd[64] = "/";
+
+/* 把相对路径解析为绝对路径（基于 cwd）；绝对路径原样规范化。
+ * 处理 .（当前段）、..（上级段）、连续斜杠；结果写入 out（≤out_size）。
+ * 返回 out 本身，便于链式调用。 */
+static const char* resolve_path(const char* in, char* out, unsigned int out_size) {
+    /* 暂存拼接后的原始路径（相对 + cwd） */
+    char raw[128];
+    unsigned int r = 0;
+    if (in[0] == '/') {
+        while (in[r] && r < sizeof(raw) - 1) { raw[r] = in[r]; r++; }
+        raw[r] = '\0';
+    } else {
+        unsigned int c = 0;
+        while (cwd[c] && c < sizeof(raw) - 1) { raw[r++] = cwd[c++]; }
+        if (r > 1 && in[0] != '\0') raw[r++] = '/';
+        unsigned int i = 0;
+        while (in[i] && r < sizeof(raw) - 1) { raw[r++] = in[i++]; }
+        raw[r] = '\0';
+    }
+
+    /* 逐段解析：. 丢弃，.. 弹栈，其余入栈 */
+    char segs[16][16];
+    int n = 0;
+    unsigned int i = 0;
+    while (raw[i]) {
+        while (raw[i] == '/') i++;
+        if (!raw[i]) break;
+        unsigned int s = 0;
+        while (raw[i] && raw[i] != '/' && s < 15) { segs[n][s++] = raw[i++]; }
+        segs[n][s] = '\0';
+        if (s == 1 && segs[n][0] == '.') {
+            /* 当前段，丢弃 */
+        } else if (s == 2 && segs[n][0] == '.' && segs[n][1] == '.') {
+            if (n > 0) n--;              /* 回上级 */
+        } else {
+            n++;
+        }
+    }
+
+    /* 拼回绝对路径 */
+    unsigned int o = 0;
+    out[o++] = '/';
+    for (int k = 0; k < n && o < out_size - 2; k++) {
+        unsigned int s = 0;
+        while (segs[k][s] && o < out_size - 2) out[o++] = segs[k][s++];
+        if (k < n - 1) out[o++] = '/';
+    }
+    out[o] = '\0';
+    return out;
+}
 static void cmd_help(const char* args) { (void)args;
     write("\nHaoOS Shell v0.1 - Available commands:\n");
     write("  help      - Show this help message\n");
@@ -511,6 +562,8 @@ static void cmd_help(const char* args) { (void)args;
     write("  cat       - Show file contents\n");
     write("  mkdir     - Create a directory\n");
     write("  ls        - List directory contents\n");
+    write("  cd        - Change directory (cd <path>, or cd for root)\n");
+    write("  pwd       - Print working directory\n");
     write("  rm        - Delete a file\n");
     write("  mount     - Mount a device (mount <device> <point>)\n");
     write("  umount    - Unmount a filesystem (umount <point>)\n");
@@ -604,7 +657,9 @@ static void cmd_save(const char* args) {
         write("Usage: save <filename> <content>\n");
         return;
     }
-    if (write_file(fname, content, (unsigned int)strlen(content)) == 0) {
+    char abs[64];
+    resolve_path(fname, abs, sizeof(abs));
+    if (write_file(abs, content, (unsigned int)strlen(content)) == 0) {
         write("Saved ");
         write(fname);
         write(" (");
@@ -625,13 +680,50 @@ static void cmd_mkdir(const char* args) {
         write("Usage: mkdir <path>\n");
         return;
     }
-    if (mkdir_sys(path) == 0) {
+    char abs[64];
+    resolve_path(path, abs, sizeof(abs));
+    if (mkdir_sys(abs) == 0) {
         write("Created directory ");
         write(path);
         write("\n");
     } else {
         write("mkdir failed (exists / bad path / no space).\n");
     }
+}
+
+/* cmd_pwd - 打印当前工作目录 */
+static void cmd_pwd(const char* args) { (void)args;
+    write(cwd);
+    putchar('\n');
+}
+
+/* cmd_cd - 切换目录（支持相对/绝对路径，. 和 ..） */
+static void cmd_cd(const char* args) {
+    char path[64];
+    unsigned int i = 0;
+    while (args[i] && args[i] != ' ' && i < sizeof(path) - 1) { path[i] = args[i]; i++; }
+    path[i] = '\0';
+    if (path[0] == '\0') {
+        /* 无参数回根目录 */
+        cwd[0] = '/'; cwd[1] = '\0';
+        return;
+    }
+
+    char abs[64];
+    resolve_path(path, abs, sizeof(abs));
+    /* 验证目标存在且是目录（列目录成功即目录） */
+    struct dirent ents[4];
+    int n = list_dir(abs, ents, 4);
+    if (n < 0) {
+        write("cd: no such directory: ");
+        write(path);
+        putchar('\n');
+        return;
+    }
+    /* 拷回 cwd（保留尾斜杠与否无所谓，resolve 统一处理） */
+    unsigned int k = 0;
+    while (abs[k] && k < sizeof(cwd) - 1) { cwd[k] = abs[k]; k++; }
+    cwd[k] = '\0';
 }
 
 /* cmd_ls - 列出目录内容 */
@@ -641,8 +733,18 @@ static void cmd_ls(const char* args) {
     while (args[i] && args[i] != ' ' && i < sizeof(path) - 1) { path[i] = args[i]; i++; }
     path[i] = '\0';
 
+    char abs[64];
+    if (path[0] == '\0') {
+        /* 无参数 = 列当前目录 */
+        unsigned int k = 0;
+        while (cwd[k] && k < sizeof(abs) - 1) { abs[k] = cwd[k]; k++; }
+        abs[k] = '\0';
+    } else {
+        resolve_path(path, abs, sizeof(abs));
+    }
+
     struct dirent ents[64];
-    int n = list_dir(path[0] ? path : NULL, ents, 64);
+    int n = list_dir(abs, ents, 64);
     if (n < 0) {
         write("Directory not found.\n");
         return;
@@ -743,7 +845,9 @@ static void cmd_rm(const char* args) {
         write("Usage: rm <filename>\n");
         return;
     }
-    if (delete_file(fname) == 0) {
+    char abs[64];
+    resolve_path(fname, abs, sizeof(abs));
+    if (delete_file(abs) == 0) {
         write("Deleted ");
         write(fname);
         write("\n");
@@ -763,8 +867,10 @@ static void cmd_cat(const char* args) {
         write("Usage: cat <filename>\n");
         return;
     }
+    char abs[64];
+    resolve_path(fname, abs, sizeof(abs));
     char buf[512];
-    int n = read_file(fname, buf, sizeof(buf));
+    int n = read_file(abs, buf, sizeof(buf));
     if (n < 0) {
         write("File not found.\n");
         return;
@@ -991,6 +1097,8 @@ static command_t commands[] = {
     { "rm",    cmd_rm },
     { "mkdir", cmd_mkdir },
     { "ls",    cmd_ls },
+    { "cd",    cmd_cd },
+    { "pwd",   cmd_pwd },
     { "mount", cmd_mount },
     { "umount", cmd_umount },
     { "devices", cmd_devices },
@@ -1048,10 +1156,11 @@ void main(void) {
     write("Type 'help' for commands.\n");
 
     while (1) {
-        /* 输出提示符，并锁定编辑区：
+        /* 输出提示符（含当前目录），并锁定编辑区：
          * 文本光标（含鼠标左键放置）只能在提示行及以下移动，
          * 历史输出不可被覆盖。鼠标指针本身不受限制，可自由移动。 */
-        write("$ ");
+        write(cwd);
+        write(" $ ");
         protect();
 
         /* 读取用户输入（返回长度未使用，readline 已写入 line） */
