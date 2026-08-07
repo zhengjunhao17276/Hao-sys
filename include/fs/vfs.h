@@ -31,4 +31,9 @@ fat_fs_t* vfs_resolve(const char* path, const char** subpath);
 /* 打印设备与挂载表（devices 命令用，内核态 vga 输出） */
 void vfs_print_devices(void);
 
+/* 虚拟 /dev 目录：枚举已注册设备生成伪目录项（devfs 简化版）。
+ * 返回项数（≤max）；每个条目 name=设备名去 "/dev/" 前缀（8.3 补空格）、
+ * attributes=0x20（文件）、file_size=扇区数×512。 */
+uint32_t vfs_list_devices(fat_dirent_t* entries, uint32_t max);
+
 #endif

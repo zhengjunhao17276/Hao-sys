@@ -161,6 +161,36 @@ static const char* fat_type_name(fat_type_t t) {
     }
 }
 
+/* 虚拟 /dev 目录内容：枚举已注册块设备，生成伪目录项。
+ * Linux 里 /dev 是 devfs（设备节点由内核动态生成）；这里简化：
+ * ls /dev 直接列出设备名（ata0/usb0...），大小=容量。 */
+uint32_t vfs_list_devices(fat_dirent_t* entries, uint32_t max) {
+    uint32_t n = 0;
+    for (uint32_t i = 0; i < dev_count && n < max; i++) {
+        const char* name = devs[i]->name;
+        /* 去 "/dev/" 前缀（6 字符），拿设备名 */
+        if (name[0] == '/' && name[1] == 'd' && name[2] == 'e' &&
+            name[3] == 'v' && name[4] == '/') {
+            name += 5;
+        }
+        fat_dirent_t* e = &entries[n];
+        /* 清空 32 字节（避免垃圾） */
+        for (int j = 0; j < 32; j++) ((uint8_t*)e)[j] = 0;
+        /* 8.3 名：大写 + 补空格 */
+        unsigned int k = 0;
+        while (name[k] && k < 11) {
+            char c = name[k];
+            if (c >= 'a' && c <= 'z') c -= 32;
+            e->name[k++] = (uint8_t)c;
+        }
+        while (k < 11) e->name[k++] = ' ';
+        e->attributes = 0x20;                     /* 普通文件（简化） */
+        e->file_size = devs[i]->sector_count * 512;
+        n++;
+    }
+    return n;
+}
+
 /* 打印设备与挂载表（devices 命令用，内核态 vga 输出） */
 void vfs_print_devices(void) {
     vga_write("[VFS] Registered devices:\n");

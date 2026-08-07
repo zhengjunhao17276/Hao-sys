@@ -193,15 +193,24 @@ static int sys_mkdir(uint32_t path) {
     return fat_mkdir(fs, sub) ? 0 : -1;
 }
 
-/* 列目录：fat_dirent_t 数组写入用户缓冲（path 可为 NULL=根） */
+/* 列目录：fat_dirent_t 数组写入用户缓冲（path 可为 NULL=根）
+ * ⚠️ /dev 是虚拟设备目录（devfs）：不落 FAT，直接枚举已注册设备 */
 static int sys_list(uint32_t path, uint32_t buf, uint32_t max) {
     if (!buf || max == 0) return -1;
     if (path && !vmm_is_user_accessible(path)) return -1;
     if (!vmm_is_user_accessible(buf)) return -1;
     if (!vmm_is_user_accessible(buf + (max - 1) * 32)) return -1;
 
+    const char* p = path ? (const char*)path : NULL;
+    /* /dev 虚拟目录：大小写不敏感匹配 */
+    if (p && p[0] == '/' &&
+        (p[1]=='d'||p[1]=='D') && (p[2]=='e'||p[2]=='E') &&
+        (p[3]=='v'||p[3]=='V') && p[4] == '\0') {
+        return (int)vfs_list_devices((fat_dirent_t*)buf, max);
+    }
+
     const char* sub;
-    fat_fs_t* fs = vfs_resolve(path ? (const char*)path : NULL, &sub);
+    fat_fs_t* fs = vfs_resolve(p, &sub);
     if (!fs) return -1;
     uint32_t dir_cluster = fat_open_dir(fs, sub);
     if (dir_cluster == 0xFFFFFFFF) return -1;

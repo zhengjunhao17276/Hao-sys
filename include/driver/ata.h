@@ -15,6 +15,9 @@
 /* 初始化并探测设备（IDENTIFY 0xEC），存在且响应正常返回 true */
 bool ata_init(bool primary);
 
+/* 磁盘总扇区数（IDENTIFY words 60-61，LBA28）；0=未知 */
+extern uint32_t ata_sector_count;
+
 /* 读一个扇区（512 字节）到 buffer */
 bool ata_read_sector(uint32_t lba, uint8_t *buffer);
 

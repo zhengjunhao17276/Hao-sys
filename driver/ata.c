@@ -24,6 +24,9 @@
 /* ATA 是否存在的标志（由 ata_init 设置） */
 static bool ata_present = false;
 
+/* 磁盘总扇区数（IDENTIFY words 60-61，LBA28）；0=未知 */
+uint32_t ata_sector_count = 0;
+
 /* 等 BSY 清零（约 10 万次轮询），顺带检查 ERR 位 */
 static bool wait_bsy(void) {
     for (int i = 0; i < 100000; i++) {
@@ -88,7 +91,14 @@ bool ata_init(bool primary) {
     }
     vga_write("[ATA] DRQ ready, reading data...\n");
 
-    for (int i = 0; i < 256; i++) inw(ATA_DATA);   /* 清掉 512 字节识别数据 */
+    /* IDENTIFY 数据 256 字：word 60-61 = LBA28 总扇区数（低位在前） */
+    uint16_t id[256];
+    for (int i = 0; i < 256; i++) id[i] = inw(ATA_DATA);
+    ata_sector_count = (uint32_t)id[60] | ((uint32_t)id[61] << 16);
+    if (ata_sector_count == 0) ata_sector_count = 0x0FFFFFFF;  /* 未知则按 LBA28 上限 */
+    vga_write("[ATA] IDENTIFY: sectors=");
+    vga_write_hex(ata_sector_count);
+    vga_write("\n");
 
     if (!wait_complete()) {
         vga_write("[ATA] Error after IDENTIFY.\n");
