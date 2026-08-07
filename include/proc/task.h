@@ -43,7 +43,7 @@ typedef struct task_struct {
 
     /* 用户态映射页登记：任务退出时逐一 unmap + 释放物理页防泄漏。
      * 上限 = load_and_run_shell 的 64 页保险丝 + 1 页用户栈 */
-    uint32_t user_virt_pages[65];
+    uint32_t user_virt_pages[96];
     uint32_t user_virt_count;
 
     struct task_struct* next;  /* 单向链表 */

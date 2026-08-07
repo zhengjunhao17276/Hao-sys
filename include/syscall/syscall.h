@@ -41,6 +41,7 @@
 #define SYS_UMOUNT     29 /* 卸载（ebx=挂载点） */
 #define SYS_DEVICES    30 /* 打印设备/挂载表 */
 #define SYS_GETKEY_NB  31 /* 非阻塞取键：有键返回键值，无键返回 -1（TUI 事件循环用） */
+#define SYS_READ_FILE_OFF 36 /* 带偏移读文件（ebx=文件名, ecx=偏移, edx=缓冲, esi=最大长度） */
 
 /*
  * regs_t - 中断上下文（由 isr80_handler 压栈形成）

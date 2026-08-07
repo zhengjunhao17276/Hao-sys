@@ -110,6 +110,10 @@ bool fat_find_file(fat_fs_t* fs, const char* filename, fat_dirent_t* out_entry);
 /* 沿簇链读文件到 buffer，最多 max_size 字节；返回实际读到的字节数 */
 uint32_t fat_load_file(fat_fs_t* fs, const fat_dirent_t* entry, void* buffer, uint32_t max_size);
 
+/* 从文件偏移 offset 处读最多 max_size 字节（分块读大文件用） */
+uint32_t fat_load_file_off(fat_fs_t* fs, const fat_dirent_t* entry,
+                           uint32_t offset, void* buffer, uint32_t max_size);
+
 /* 新建/覆盖文件，返回 true=成功 */
 bool fat_write_file(fat_fs_t* fs, const char* filename, const void* data, uint32_t size);
 

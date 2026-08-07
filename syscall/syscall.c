@@ -173,6 +173,22 @@ static int sys_read_file(uint32_t filename, uint32_t buf, uint32_t max_size) {
     return (int)fat_load_file(fs, &entry, (void*)buf, max_size);
 }
 
+/* 带偏移读文件（分块复制大文件用）：ebx=文件名, ecx=偏移, edx=缓冲, esi=最大长度 */
+static int sys_read_file_off(uint32_t filename, uint32_t offset, uint32_t buf, uint32_t max_size) {
+    if (!filename || !buf) return -1;
+    if (!vmm_is_user_accessible(filename)) return -1;
+    if (max_size == 0) return -1;
+    if (!vmm_is_user_accessible(buf)) return -1;
+    if (!vmm_is_user_accessible(buf + max_size - 1)) return -1;
+
+    const char* sub;
+    fat_fs_t* fs = vfs_resolve((const char*)filename, &sub);
+    if (!fs) return -1;
+    fat_dirent_t entry;
+    if (!fat_find_file(fs, sub, &entry)) return -1;
+    return (int)fat_load_file_off(fs, &entry, offset, (void*)buf, max_size);
+}
+
 /* 删除文件/空目录 */
 static int sys_delete_file(uint32_t filename) {
     if (!filename) return -1;
@@ -464,6 +480,11 @@ void syscall_dispatcher(regs_t *regs) {
 
         case SYS_GETKEY_NB:
             ret = sys_getkey_nb();
+            break;
+
+        case SYS_READ_FILE_OFF:
+            /* ebx=文件名, ecx=偏移, edx=缓冲, esi=最大长度 */
+            ret = sys_read_file_off(regs->ebx, regs->ecx, regs->edx, regs->esi);
             break;
 
         default:

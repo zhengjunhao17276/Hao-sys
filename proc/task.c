@@ -143,7 +143,7 @@ static void free_task(task_t* task) {
     /* ⚠️ 架构升级：用户页映射在任务自己的页目录里，反查/解映射必须用
      * task->page_directory（当前 CR3 可能是其他任务的目录）。 */
     uint32_t* dir = task->page_directory ? task->page_directory : vmm_get_current_directory();
-    for (uint32_t i = 0; i < task->user_virt_count && i < 65; i++) {
+    for (uint32_t i = 0; i < task->user_virt_count && i < 96; i++) {
         uint32_t virt = task->user_virt_pages[i];
         uint32_t phys = vmm_get_phys_addr(dir, virt);
         if (phys) {

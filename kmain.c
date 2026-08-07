@@ -116,9 +116,14 @@ static void load_and_run_shell(void) {
     vga_write_hex(entry.file_size);
     vga_write(" bytes.\n");
 
-    /* 2. 分配代码物理页 */
-    uint32_t code_pages = (entry.file_size + 4095) / 4096;
-    if (code_pages > 64) {
+    /* 2. 分配代码物理页
+     * ⚠️ 额外映射 64KB .bss 区（BSS_PAGES 页）：用户程序的 static
+     * 大缓冲（如 FM 复制用的 64KB）落在 .bss，扁平二进制不含 .bss，
+     * 不映射会 #PF。 */
+    #define BSS_PAGES 16
+    uint32_t file_pages = (entry.file_size + 4095) / 4096;
+    uint32_t code_pages = file_pages + BSS_PAGES;
+    if (file_pages > 64) {
         /* 保险丝：>256KB 直接拒绝（理论上不可能） */
         vga_write("[Shell] SHELL.BIN too large (>256KB), refusing.\n");
         return;
@@ -166,7 +171,7 @@ static void load_and_run_shell(void) {
     vga_write("\n");
 
     /* ⚠️ 一次性分配所有额外页，失败时统一释放，不再泄漏 */
-    uint32_t extra_phys[64];
+    uint32_t extra_phys[80];
     for (uint32_t pi = 1; pi < code_pages; pi++) {
         extra_phys[pi - 1] = (uint32_t)pmm_alloc_page();
         if (!extra_phys[pi - 1]) {
@@ -202,7 +207,12 @@ static void load_and_run_shell(void) {
         vmm_map_page(vmm_get_current_directory(), load_virt + pi * 4096, phys, PAGE_WRITE);
     }
 
+    /* 只加载文件内容（.bss 页零填充即可） */
     uint32_t loaded = fat_load_file(root_fs, &entry, (void*)load_virt, entry.file_size);
+    for (uint32_t pi = file_pages; pi < code_pages; pi++) {
+        /* .bss 页清零 */
+        memset((void*)(load_virt + pi * 4096), 0, 4096);
+    }
     for (uint32_t pi = 0; pi < code_pages; pi++) {
         vmm_unmap_page(vmm_get_current_directory(), load_virt + pi * 4096);
     }
@@ -259,13 +269,13 @@ static void load_and_run_shell(void) {
 
     /* 登记用户页供退出时回收（代码页 + 用户栈页） */
     shell_task->user_virt_count = 0;
-    for (uint32_t pi = 0; pi < code_pages && shell_task->user_virt_count < 65; pi++) {
+    for (uint32_t pi = 0; pi < code_pages && shell_task->user_virt_count < 96; pi++) {
         shell_task->user_virt_pages[shell_task->user_virt_count++] = code_virt + pi * 4096;
     }
-    if (shell_task->user_virt_count < 65) {
+    if (shell_task->user_virt_count < 96) {
         shell_task->user_virt_pages[shell_task->user_virt_count++] = stack_virt;
     }
-    if (shell_task->user_virt_count < 65) {
+    if (shell_task->user_virt_count < 96) {
         shell_task->user_virt_pages[shell_task->user_virt_count++] = stack_virt + 0x1000;
     }
     vga_write("[Shell] User task created (PID=");

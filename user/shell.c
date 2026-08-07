@@ -34,6 +34,7 @@
 #define SYS_UMOUNT     29  /* 卸载（ebx=挂载点） */
 #define SYS_DEVICES    30  /* 打印设备/挂载表 */
 #define SYS_GETKEY_NB  31  /* 非阻塞取键：有键返回键值，无键返回 -1 */
+#define SYS_READ_FILE_OFF 36  /* 带偏移读文件 */
 
 /* FAT 目录项（与内核 fat_dirent_t 布局一致，32 字节） */
 struct dirent {
@@ -188,6 +189,13 @@ static int delete_file(const char* name) {
 static int read_file(const char* name, void* buf, unsigned int max) {
     int r;
     __asm__ volatile ("int $0x80" : "=a"(r) : "a"(SYS_READ_FILE), "b"((unsigned int)name), "c"((unsigned int)buf), "d"(max) : "memory");
+    return r;
+}
+
+/* read_file_off - 带偏移读文件（分块复制用） */
+static int read_file_off(const char* name, unsigned int offset, void* buf, unsigned int max) {
+    int r;
+    __asm__ volatile ("int $0x80" : "=a"(r) : "a"(SYS_READ_FILE_OFF), "b"((unsigned int)name), "c"(offset), "d"((unsigned int)buf), "S"(max) : "memory");
     return r;
 }
 
@@ -1334,16 +1342,27 @@ static void fileman_tui(void) {
                 dst[dk++] = '.'; dst[dk++] = 'C'; dst[dk++] = 'P'; dst[dk++] = 'Y';
                 dst[dk] = '\0';
 
-                /* 整文件复制（≤4KB，栈缓冲；read_file 不支持偏移读）
-                 * 超过 4KB 的文件拒绝复制（避免静默截断） */
-                if (ents[sel].file_size > 4096) {
+                /* 整文件复制：分块读（read_file_off 带偏移）进 static 缓冲，
+                 * 再整写。static 在 .bss（已映射 64KB），留余量用 60KB */
+                static char copy_buf[61440];
+                unsigned int fsize = ents[sel].file_size;
+                if (fsize > sizeof(copy_buf)) {
                     set_cursor(23, 2);
-                    write("Too large to copy (>4KB)");
+                    write("Too large to copy (>64KB)");
                     yield();
                 } else {
-                    char copy_buf[4096];
-                    int n = read_file(src, copy_buf, sizeof(copy_buf));
-                    if (n >= 0 && write_file(dst, copy_buf, (unsigned int)n) == 0) {
+                    /* 分块读入 copy_buf */
+                    unsigned int got = 0;
+                    int ok = 1;
+                    while (got < fsize) {
+                        unsigned int want = fsize - got;
+                        if (want > 4096) want = 4096;
+                        int n = read_file_off(src, got, copy_buf + got, want);
+                        if (n <= 0) { ok = 0; break; }
+                        got += (unsigned int)n;
+                        if ((unsigned int)n < want) break;   /* 读尽 */
+                    }
+                    if (ok && write_file(dst, copy_buf, got) == 0) {
                         dirty = 1;   /* 重绘列表 */
                     }
                 }

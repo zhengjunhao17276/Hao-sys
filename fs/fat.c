@@ -575,6 +575,56 @@ uint32_t fat_load_file(fat_fs_t* fs, const fat_dirent_t* entry, void* buffer, ui
     return file_size - remaining;
 }
 
+/* 从文件偏移 offset 处读最多 max_size 字节到 buffer。
+ * 遍历簇链跳过前 offset 字节，然后顺序读取。返回实际字节数。
+ * ⚠️ fat_load_file 只能从头读；TUI 文件管理器分块复制大文件需要它。 */
+uint32_t fat_load_file_off(fat_fs_t* fs, const fat_dirent_t* entry,
+                           uint32_t offset, void* buffer, uint32_t max_size) {
+    uint32_t fl = irq_lock();
+    if (!fs->initialized || !entry || !buffer || max_size == 0) { irq_unlock(fl); return 0; }
+    if (offset >= entry->file_size) { irq_unlock(fl); return 0; }
+
+    uint32_t first_cluster = (entry->cluster_high << 16) | entry->cluster_low;
+    uint32_t file_size = entry->file_size;
+    if (file_size - offset < max_size) max_size = file_size - offset;
+
+    uint8_t* dest = (uint8_t*)buffer;
+    uint32_t remaining = max_size;
+    uint32_t cluster = first_cluster;
+    uint32_t skip = offset;
+    if (cluster < 2) { irq_unlock(fl); return 0; }
+
+    while (remaining > 0 && cluster < 0x0FFFFFF8) {
+        uint32_t lba = fs->first_data_sector + (cluster - 2) * fs->sectors_per_cluster;
+        for (uint32_t s = 0; s < fs->sectors_per_cluster && remaining > 0; s++) {
+            if (!fat_dev_read(fs, lba + s, fs->sector_buffer)) {
+                irq_unlock(fl);
+                return max_size - remaining;
+            }
+            uint32_t off_in_sector = 0;
+            if (skip > 0) {
+                /* 跳过本扇区内的前 skip 字节 */
+                if (skip >= fs->bytes_per_sector) {
+                    skip -= fs->bytes_per_sector;
+                    continue;
+                }
+                off_in_sector = skip;
+                skip = 0;
+            }
+            uint32_t avail = fs->bytes_per_sector - off_in_sector;
+            uint32_t copy = (remaining < avail) ? remaining : avail;
+            memcpy(dest, fs->sector_buffer + off_in_sector, copy);
+            dest += copy;
+            remaining -= copy;
+        }
+        uint32_t next = read_fat_entry(fs, cluster);
+        if (next >= 0x0FFFFFF8) break;
+        cluster = next;
+    }
+    irq_unlock(fl);
+    return max_size - remaining;
+}
+
 /* 整条簇链表项写 0，含 FAT2 镜像 */
 static void fat_free_chain(fat_fs_t* fs, uint32_t first_cluster) {
     uint32_t c = first_cluster;
