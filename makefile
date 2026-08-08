@@ -18,7 +18,9 @@ OBJS = start.o isr_asm.o kmain.o vga.o pic.o keyboard.o mouse.o speaker.o \
        idt.o syscall.o pmm.o vmm.o task.o switch.o user_enter.o string.o fat.o vfs.o rtc.o pit.o probe.o
 
 SHELL_SRC  = user/shell.c
+VI_SRC     = user/vi.c
 SHELL_OBJ  = user/shell.o
+VI_OBJ     = user/vi.o
 SHELL_ELF  = user/shell.elf
 SHELL_BIN  = user/shell.bin
 DISK_IMG   = disk.img
@@ -116,8 +118,11 @@ kernel.elf: $(OBJS)
 $(SHELL_OBJ): $(SHELL_SRC)
 	$(CC) -m32 -ffreestanding -nostdlib -fno-stack-protector -mno-red-zone -O0 -MMD -MP -c $< -o $@
 
-$(SHELL_ELF): $(SHELL_OBJ)
-	$(LD) -m elf_i386 -Ttext 0x10000000 -e main -o $@ $<
+$(VI_OBJ): $(VI_SRC)
+	$(CC) -m32 -ffreestanding -nostdlib -fno-stack-protector -mno-red-zone -O0 -MMD -MP -c $< -o $@
+
+$(SHELL_ELF): $(SHELL_OBJ) $(VI_OBJ)
+	$(LD) -m elf_i386 -Ttext 0x10000000 -e main -o $@ $^
 
 $(SHELL_BIN): $(SHELL_ELF)
 	$(OBJCOPY) -O binary $< $@
@@ -158,4 +163,4 @@ clean-all: clean
 .PHONY: all run run-atthisconsole clean clean-all
 
 # 头文件依赖（-MMD 生成，改 include 头文件自动重编对应 .c）
--include $(OBJS:.o=.d) $(SHELL_OBJ:.o=.d)
+-include $(OBJS:.o=.d) $(SHELL_OBJ:.o=.d) $(VI_OBJ:.o=.d)

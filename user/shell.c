@@ -652,6 +652,7 @@ static void cmd_help(const char* args) { (void)args;
     write("  time      - Show date and time\n");
     write("  uptime    - Show time since boot\n");
     write("  settings  - Open settings TUI\n");
+    write("  vi        - Edit a file (vi-style)\n");
     write("  shutdown  - Power off the system\n");
     write("  reboot    - Restart the system\n");
     write("\n");
@@ -1738,6 +1739,26 @@ static void cmd_settings(const char* args) { (void)args;
     settings_tui();
 }
 
+/* cmd_vi - 迷你 vi 编辑器入口（实现见 vi.c，extern 声明） */
+extern void vi_main(const char* filename);
+
+static void cmd_vi(const char* args) {
+    char path[64];
+    unsigned int i = 0;
+    while (args[i] && args[i] != ' ' && i < sizeof(path) - 1) { path[i] = args[i]; i++; }
+    path[i] = '\0';
+    if (path[0] == '\0') {
+        vi_main(NULL);
+    } else {
+        char abs[64];
+        resolve_path(path, abs, sizeof(abs));
+        vi_main(abs);
+    }
+    /* 退出后清屏复位，shell 提示符从底部重新开始 */
+    clear_screen();
+    set_cursor(24, 0);
+}
+
 /* cmd_fm - TUI 文件管理器入口 */
 static void cmd_fm(const char* args) { (void)args;
     fileman_tui();
@@ -1780,6 +1801,7 @@ static command_t commands[] = {
     { "settings", cmd_settings },
     { "set",   cmd_settings },
     { "fm",    cmd_fm },
+    { "vi",    cmd_vi },
     { "shutdown", cmd_shutdown },
     { "reboot",  cmd_reboot },
     { NULL,    NULL }
