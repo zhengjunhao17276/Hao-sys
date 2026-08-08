@@ -21,7 +21,13 @@
 make -j8 CC="gcc -m32" LD="ld" OBJCOPY="objcopy"
 ```
 
-**打包单文件可启动镜像**（手写 MBR 引导器，无需 GRUB）：
+**一键构建 + 打包 + 启动：**
+
+```bash
+./run.sh
+```
+
+`--no-build` 跳过编译只打包启动，`--no-run` 只构建不启动。分步执行也可（手动）:
 
 ```bash
 ./make_boot.sh    # 编译 MBR 引导器（stage1 + stage2）
