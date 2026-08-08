@@ -97,6 +97,13 @@ static int sys_set_cursor(uint32_t row, uint32_t col) {
     return 0;
 }
 
+/* 光标可见性：ebx=0 隐藏、1=显示（全屏 TUI 界面用，消除硬件光标闪烁） */
+static int sys_cursor_visible(uint32_t on) {
+    if (on) vga_enable_cursor();
+    else vga_disable_cursor();
+    return 0;
+}
+
 /* 返回 (行 << 16) | 列 */
 static int sys_get_cursor(void) {
     return (int)vga_get_cursor_pos();
@@ -375,6 +382,11 @@ void syscall_dispatcher(regs_t *regs) {
 
         case SYS_GET_CURSOR:
             ret = sys_get_cursor();
+            break;
+
+        case SYS_CURSOR:
+            /* ebx = 0 隐藏 / 1 显示 */
+            ret = sys_cursor_visible(regs->ebx);
             break;
 
         case SYS_CLEAR:

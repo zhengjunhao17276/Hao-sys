@@ -166,6 +166,15 @@ static const char* fat_type_name(fat_type_t t) {
  * ls /dev 直接列出设备名（ata0/usb0...），大小=容量。 */
 uint32_t vfs_list_devices(fat_dirent_t* entries, uint32_t max) {
     uint32_t n = 0;
+    /* 虚拟目录没有 FAT 自带的 "."/".."，先合成 ".."，否则进 /dev 后无法返回上级 */
+    if (n < max) {
+        fat_dirent_t* e = &entries[n];
+        for (int j = 0; j < 32; j++) ((uint8_t*)e)[j] = 0;
+        e->name[0] = '.'; e->name[1] = '.';
+        for (int j = 2; j < 11; j++) e->name[j] = ' ';
+        e->attributes = 0x10;                    /* 目录 */
+        n++;
+    }
     for (uint32_t i = 0; i < dev_count && n < max; i++) {
         const char* name = devs[i]->name;
         /* 去 "/dev/" 前缀（6 字符），拿设备名 */
@@ -215,6 +224,15 @@ static unsigned int mount_point_name(const char* point, char* out, unsigned int 
  * 属性=目录。挂载了就出现、卸载就消失——挂载点由系统挂载出来。 */
 uint32_t vfs_list_mount_points(fat_dirent_t* entries, uint32_t max) {
     uint32_t n = 0;
+    /* 同 /dev：先合成 ".."，保证挂载点目录也能返回上级 */
+    if (n < max) {
+        fat_dirent_t* e = &entries[n];
+        for (int j = 0; j < 32; j++) ((uint8_t*)e)[j] = 0;
+        e->name[0] = '.'; e->name[1] = '.';
+        for (int j = 2; j < 11; j++) e->name[j] = ' ';
+        e->attributes = 0x10;                    /* 目录 */
+        n++;
+    }
     for (uint32_t i = 0; i < VFS_MAX_MOUNTS && n < max; i++) {
         if (!mounts[i].mounted || !mounts[i].mount_point) continue;
         if (strcmp(mounts[i].mount_point, "/") == 0) continue;  /* 跳过根挂载 */

@@ -35,6 +35,7 @@
 #define SYS_DEVICES    30  /* 打印设备/挂载表 */
 #define SYS_GETKEY_NB  31  /* 非阻塞取键：有键返回键值，无键返回 -1 */
 #define SYS_READ_FILE_OFF 36  /* 带偏移读文件 */
+#define SYS_CURSOR     37  /* 光标可见性（0=隐藏，1=显示） */
 
 /* FAT 目录项（与内核 fat_dirent_t 布局一致，32 字节） */
 struct dirent {
@@ -116,6 +117,11 @@ static int getmouse(int *x, int *y, int *buttons) {
 /* set_cursor - 定位 VGA 光标 */
 static void set_cursor(int row, int col) {
     __asm__ volatile ("int $0x80" : : "a"(SYS_SET_CURSOR), "b"((unsigned int)row), "c"((unsigned int)col) : "memory");
+}
+
+/* cursor_visible - 硬件光标显隐（0=隐藏，1=显示）；全屏 TUI 界面用来消除闪烁 */
+static void cursor_visible(int on) {
+    __asm__ volatile ("int $0x80" : : "a"(SYS_CURSOR), "b"((unsigned int)on) : "memory");
 }
 
 /* get_cursor - 读光标位置（(行<<16)|列） */
@@ -1075,6 +1081,20 @@ static unsigned int fm_input(const char* prompt, char* buf, unsigned int size) {
     }
 }
 
+/* fm_parent - 栏的上级路径：cwd + "/.." 交给 resolve_path 归一化
+ * （"/dev/.."→"/"，"/mnt/usb/.."→"/mnt"）。
+ * ⚠️ 不能直接 resolve_path("..")：它相对全局 shell cwd 解析，FM 里
+ * 导航后栏目录与 shell cwd 已脱节，会回错地方。 */
+static void fm_parent(const char* cur, char* out, unsigned int out_size) {
+    char rel[80];
+    unsigned int r = 0;
+    while (cur[r] && r < sizeof(rel) - 1) { rel[r] = cur[r]; r++; }
+    if (r > 0 && rel[r-1] != '/') rel[r++] = '/';
+    rel[r++] = '.'; rel[r++] = '.';
+    rel[r] = '\0';
+    resolve_path(rel, out, out_size);
+}
+
 /*
  * fileman_tui - TUI 文件管理器（P1：单栏列表 + 鼠标/键盘导航）
  *
@@ -1118,6 +1138,7 @@ static void fileman_tui(void) {
     int click_cnt = 0;       /* 双击计数（点不同项自动重置） */
 
     clear_screen();
+    cursor_visible(0);   /* 全屏 TUI：隐藏硬件光标，消除闪烁 */
 
     while (1) {
         /* ---- 双栏加载 + 绘制（任一栏 dirty 时全量重绘） ---- */
@@ -1283,7 +1304,7 @@ static void fileman_tui(void) {
             /* Left = 返回上级 */
             if (panes[active].cwd[1] != '\0') {
                 char parent[64];
-                resolve_path("..", parent, sizeof(parent));
+                fm_parent(panes[active].cwd, parent, sizeof(parent));
                 unsigned int k = 0;
                 while (parent[k] && k < sizeof(panes[active].cwd) - 1) { panes[active].cwd[k] = parent[k]; k++; }
                 panes[active].cwd[k] = '\0';
@@ -1315,7 +1336,7 @@ static void fileman_tui(void) {
             /* Esc = 返回上级 */
             if (panes[active].cwd[1] != '\0') {
                 char parent[64];
-                resolve_path("..", parent, sizeof(parent));
+                fm_parent(panes[active].cwd, parent, sizeof(parent));
                 unsigned int k = 0;
                 while (parent[k] && k < sizeof(panes[active].cwd) - 1) { panes[active].cwd[k] = parent[k]; k++; }
                 panes[active].cwd[k] = '\0';
@@ -1416,6 +1437,7 @@ static void fileman_tui(void) {
 
     /* 退出：清屏 + 同步 cwd 到 shell（活动栏目录） */
     clear_screen();
+    cursor_visible(1);   /* 恢复硬件光标给 shell 提示符 */
     unsigned int k = 0;
     while (panes[active].cwd[k] && k < sizeof(cwd) - 1) { cwd[k] = panes[active].cwd[k]; k++; }
     cwd[k] = '\0';
