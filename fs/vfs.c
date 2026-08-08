@@ -7,6 +7,7 @@
 #include "../include/driver/vga.h"
 #include "../include/lib/string.h"
 #include "../include/fs/vfs.h"
+#include "../include/fs/probe.h"
 #include <stdint.h>
 #include <stdbool.h>
 
@@ -68,6 +69,17 @@ bool vfs_mount(const char* point, const char* dev_name) {
     uint32_t idx = (uint32_t)(slot - mounts);
     strncpy(mount_point_storage[idx], point, sizeof(mount_point_storage[idx]) - 1);
     mount_point_storage[idx][sizeof(mount_point_storage[idx]) - 1] = '\0';
+
+    /* 挂载前先识别文件系统：目前只支持 FAT 家族，其余明确报错 */
+    probe_fs_t fs_type = fs_probe(dev);
+    if (fs_type != FS_FAT12 && fs_type != FS_FAT16 && fs_type != FS_FAT32) {
+        vga_write("[VFS] Unsupported filesystem on '");
+        vga_write(dev_name);
+        vga_write("': ");
+        vga_write(probe_fs_name(fs_type));
+        vga_write(" (only FAT12/16/32)\n");
+        return false;
+    }
 
     if (!fat_mount(&slot->fs, dev)) {
         vga_write("[VFS] Mount failed: no FAT filesystem on '");
@@ -258,6 +270,8 @@ void vfs_print_devices(void) {
         vga_write(devs[i]->name);
         vga_write("  sectors=");
         vga_write_hex(devs[i]->sector_count);
+        vga_write("  fs=");
+        vga_write(probe_fs_name(fs_probe(devs[i])));
         vga_write("\n");
     }
     vga_write("[VFS] Mount table:\n");

@@ -32,6 +32,11 @@ static bool ata_blk_read(uint32_t lba, void* buf) { return ata_read_sector(lba, 
 static bool ata_blk_write(uint32_t lba, const void* buf) { return ata_write_sector(lba, (const uint8_t*)buf); }
 static block_dev_t ata_block_dev = { "/dev/ata0", ata_blk_read, ata_blk_write, 0 };
 
+/* ata1（同通道从盘）：文件系统识别测试/第二块盘 */
+static bool ata_blk_read_slave(uint32_t lba, void* buf) { return ata_read_sector_slave(lba, (uint8_t*)buf); }
+static bool ata_blk_write_slave(uint32_t lba, const void* buf) { return ata_write_sector_slave(lba, (const uint8_t*)buf); }
+static block_dev_t ata_slave_block_dev = { "/dev/ata1", ata_blk_read_slave, ata_blk_write_slave, 0 };
+
 /* @magic/info_addr 由 GRUB 传入；返回磁盘上是否有 FAT 文件系统。
  * 顺序依赖：PCI 扫描必须在 USB 之前（USB 控制器靠 PCI 发现）。 */
 bool kinit(uint32_t magic, uint32_t info_addr) {
@@ -76,6 +81,12 @@ bool kinit(uint32_t magic, uint32_t info_addr) {
         ata_block_dev.sector_count = ata_sector_count;   /* IDENTIFY 容量 */
         vfs_register_device(&ata_block_dev);
         fs_ready = vfs_mount("/", "/dev/ata0");
+    }
+
+    /* 从盘（若有）：注册为 /dev/ata1，不自动挂载 */
+    if (ata_slave_sector_count > 0) {
+        ata_slave_block_dev.sector_count = ata_slave_sector_count;
+        vfs_register_device(&ata_slave_block_dev);
     }
 
     vga_write("[STEP 9] Task init...\n");
