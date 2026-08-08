@@ -308,6 +308,14 @@ static void sys_poweroff(void) {
     for (;;) __asm__ volatile ("hlt");
 }
 
+/* 重启：8042 复位口（0x64←0xFE 触发 CPU 复位，QEMU/真机通用）；
+ * 复位未生效则 cli+hlt 兜底 */
+static void sys_reboot(void) {
+    outb(0x64, 0xFE);
+    __asm__ volatile ("cli");
+    for (;;) __asm__ volatile ("hlt");
+}
+
 /* ---- 凭据：uid/gid/euid/egid ---- */
 static int sys_getuid(void)  { return current_task ? (int)current_task->uid  : 0; }
 static int sys_getgid(void)  { return current_task ? (int)current_task->gid  : 0; }
@@ -735,6 +743,12 @@ void syscall_dispatcher(regs_t *regs) {
         case SYS_POWEROFF:
             /* 关机：不返回 */
             sys_poweroff();
+            ret = 0;
+            break;
+
+        case SYS_REBOOT:
+            /* 重启：不返回 */
+            sys_reboot();
             ret = 0;
             break;
 

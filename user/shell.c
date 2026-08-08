@@ -46,6 +46,7 @@
 #define SYS_CHMOD      45  /* 改权限（ebx=路径, ecx=mode） */
 #define SYS_CHOWN      46  /* 改属主（ebx=路径, ecx=uid, edx=gid） */
 #define SYS_POWEROFF   47  /* 关机（不返回） */
+#define SYS_REBOOT     48  /* 重启（不返回） */
 
 /* stat 结果（与内核 stat_info_t 一致，16 字节） */
 struct stat_info {
@@ -126,6 +127,11 @@ static void write(const char* s) {
 /* poweroff_sys - 关机系统调用（不返回） */
 static void poweroff_sys(void) {
     __asm__ volatile ("int $0x80" : : "a"(SYS_POWEROFF) : "memory");
+}
+
+/* reboot_sys - 重启系统调用（不返回） */
+static void reboot_sys(void) {
+    __asm__ volatile ("int $0x80" : : "a"(SYS_REBOOT) : "memory");
 }
 
 /* yield - 通过系统调用让出 CPU（协作式调度测试） */
@@ -647,6 +653,7 @@ static void cmd_help(const char* args) { (void)args;
     write("  uptime    - Show time since boot\n");
     write("  settings  - Open settings TUI\n");
     write("  shutdown  - Power off the system\n");
+    write("  reboot    - Restart the system\n");
     write("\n");
 }
 
@@ -672,6 +679,14 @@ static void cmd_shutdown(const char* args) { (void)args;
     write("Shutting down...\n");
     poweroff_sys();
     /* 理论不可达：内核关机不返回 */
+    while (1) {}
+}
+
+/* cmd_reboot - 重启系统 */
+static void cmd_reboot(const char* args) { (void)args;
+    write("Rebooting...\n");
+    reboot_sys();
+    /* 理论不可达：内核重启不返回 */
     while (1) {}
 }
 
@@ -1766,6 +1781,7 @@ static command_t commands[] = {
     { "set",   cmd_settings },
     { "fm",    cmd_fm },
     { "shutdown", cmd_shutdown },
+    { "reboot",  cmd_reboot },
     { NULL,    NULL }
 };
 
