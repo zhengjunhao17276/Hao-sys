@@ -198,7 +198,6 @@ static bool ps2_init(void) {
         return false;
     }
     ps2_initialized = true;
-    vga_write("[PS/2 Mouse] Initialized.\n");
     return true;
 }
 
@@ -407,7 +406,6 @@ void mouse_init(void) {
     if (usb_mouse_probe()) {
         current_backend = BACKEND_USB;
         mouse_available = true;
-        vga_write("[Mouse] Using USB backend.\n");
         ps2_init();     /* 也初始化 PS/2 作为后备 */
         return;
     }

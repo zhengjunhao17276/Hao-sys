@@ -16,16 +16,7 @@
 
 /* 已扫描总线标记（最多 256 条总线） */
 static bool scanned_buses[256];
-static uint32_t pci_device_count = 0;   /* 枚举到的设备数（启动日志用） */
-
-/* 十进制输出（启动日志计数用，内核无现成十进制打印） */
-static void pci_print_dec(uint32_t v) {
-    char buf[12];
-    int i = 0;
-    if (v == 0) { vga_putchar('0'); return; }
-    while (v > 0) { buf[i++] = '0' + (v % 10); v /= 10; }
-    while (i > 0) vga_putchar(buf[--i]);
-}
+static uint32_t pci_device_count = 0;   /* 枚举到的设备数（保留计数，供将来使用） */
 
 /* 前向声明 */
 static void pci_scan_bus(int bus);
@@ -101,9 +92,6 @@ void pci_init(void) {
     pci_device_count = 0;
 
     pci_scan_bus(0);
-    vga_write("[PCI] ");
-    pci_print_dec(pci_device_count);
-    vga_write(" device(s)\n");
 }
 
 /* pci_init 的别名 */

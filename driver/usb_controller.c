@@ -911,7 +911,6 @@ static void probe_controllers(void) {
 void usb_init(void) {
     probe_controllers();
     if (hc_count == 0) {
-        vga_write("[USB] No UHCI controller.\n");
         return;
     }
 

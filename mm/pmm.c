@@ -80,9 +80,6 @@ void pmm_init(uint32_t info_addr) {
 
     total_memory = total_kb * 1024;          /* KB → 字节 */
     total_pages  = total_memory / 4096;      /* 总页数 */
-    vga_write("[PMM] Memory: ");
-    vga_write_hex(total_kb);
-    vga_write(" KB\n");
 
 
     /* 位图放 _end 处；还没开分页，直接写物理地址就行 */
@@ -159,10 +156,6 @@ void pmm_init(uint32_t info_addr) {
             free_pages--;
         }
     }
-
-    vga_write("[PMM] Free pages: ");
-    vga_write_hex(free_pages);
-    vga_write("\n");
 
     /* 一个空闲页都没有就别跑了，停机 */
     if (free_pages == 0) {

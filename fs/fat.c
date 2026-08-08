@@ -129,15 +129,6 @@ static bool fat_bpb_load(fat_fs_t* fs) {
         return false;
     }
 
-    vga_write("[FAT] ");
-    switch (fs->fs_type) {
-        case FAT12: vga_write("FAT12"); break;
-        case FAT16: vga_write("FAT16"); break;
-        case FAT32: vga_write("FAT32"); break;
-        default:    vga_write("?"); break;
-    }
-    vga_write(" filesystem\n");
-
     fs->bytes_per_sector    = fs->bpb.bytes_per_sector;
     fs->sectors_per_cluster = fs->bpb.sectors_per_cluster;
     fs->root_dir_entries    = fs->bpb.root_entry_count;

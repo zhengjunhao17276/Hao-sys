@@ -153,8 +153,6 @@ void keyboard_init(void) {
     /* 清空 PS/2 控制器输出缓冲 */
     while (inb(0x64) & 0x01) (void)inb(0x60);
 
-    vga_write("[PS/2 Keyboard] Initialized.\n");
-
     usb_keyboard_init();
 
     /* 屏蔽键盘 IRQ，纯轮询读取——避免 IRQ 与轮询竞争 */

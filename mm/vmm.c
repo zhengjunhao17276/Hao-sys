@@ -108,8 +108,6 @@ void vmm_init(void) {
     __asm__ volatile ("mov %%cr0, %0" : "=r"(cr0));
     cr0 |= 0x80000000;   /* CR0.PG = 1 */
     __asm__ volatile ("mov %0, %%cr0" : : "r"(cr0) : "memory");
-
-    vga_write("[VMM] Paging enabled with identity mapping over all physical memory.\n");
 }
 
 

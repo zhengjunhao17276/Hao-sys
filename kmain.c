@@ -43,12 +43,9 @@ bool kinit(uint32_t magic, uint32_t info_addr) {
     (void)magic;   /* 启动日志已精简，魔数/地址不再展示 */
     vga_init();
 
-    vga_write("[STEP 2] PMM init...\n");
     pmm_init(info_addr);
-    vga_write("[STEP 3] VMM init...\n");
     vmm_init();
 
-    vga_write("[STEP 4] IDT/PIC init...\n");
     idt_init();
     pic_init();
 
@@ -57,23 +54,16 @@ bool kinit(uint32_t magic, uint32_t info_addr) {
     pit_init(100);
     pic_mask_irq(0, false);
 
-    vga_write("[STEP 5] PCI scan...\n");
     pci_init();
 
-    vga_write("[STEP 6] USB init...\n");
     usb_init();
-
-    vga_write("[STEP 7] Keyboard/mouse init...\n");
-
 
     rtc_init();   /* 记录开机时刻（uptime 基准） */
     keyboard_init();
     mouse_init();
 
-    vga_write("[STEP 8] ATA init...\n");
     bool fs_ready = false;
     if(ata_init(true)) {
-        vga_write("[STEP 8b] FAT init...\n");
         ata_block_dev.sector_count = ata_sector_count;   /* IDENTIFY 容量 */
         vfs_register_device(&ata_block_dev);
         fs_ready = vfs_mount("/", "/dev/ata0");
@@ -85,7 +75,7 @@ bool kinit(uint32_t magic, uint32_t info_addr) {
         vfs_register_device(&ata_slave_block_dev);
     }
 
-    vga_write("[STEP 9] Task init...\n");
+
 
 
 
@@ -261,9 +251,6 @@ static void load_and_run_shell(void) {
     if (shell_task->user_virt_count < 96) {
         shell_task->user_virt_pages[shell_task->user_virt_count++] = stack_virt + 0x1000;
     }
-    vga_write("[Shell] OK (PID=");
-    vga_write_hex(shell_task->pid);
-    vga_write(")\n");
 
     /* ⚠️ 必须让调度器知道真正在跑的是 shell。之前 current_task 一直
      * 是 idle——裸 iret 进用户态后，int 0x80/IRQ 入口的
@@ -315,7 +302,6 @@ static void load_and_run_shell(void) {
  * 决定是否加载 Shell。 */
 void kmain(uint32_t magic, uint32_t info_addr) {
     if(kinit(magic, info_addr)){
-        vga_write("[Auto] Loading /BIN/SHELL.BIN...\n");
 	load_and_run_shell();
     }
     else {

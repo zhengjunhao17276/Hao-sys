@@ -206,8 +206,6 @@ void task_init(void) {
     task_list = idle;
     current_task = idle;
     idle_task = idle;
-
-    vga_write("[TASK] Scheduler ready\n");
 }
 
 /* 创建内核任务：分配 PCB + 内核栈，栈上布好 [popa 帧][EBP=0][entry]，

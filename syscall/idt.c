@@ -109,6 +109,4 @@ void idt_init(void) {
     idtr.limit = sizeof(idt) - 1;
     idtr.base  = (uint32_t)idt;
     __asm__ volatile ("lidt (%0)" : : "r"(&idtr));
-
-    vga_write("[IDT] Initialized with 256 gates. int 0x80 installed.\n");
 }
