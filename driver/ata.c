@@ -95,24 +95,22 @@ static bool ata_identify(uint8_t drive_select, uint32_t* out_sectors) {
 bool ata_init(bool primary) {
     (void)primary;  /* 目前只使用主通道 */
 
-    vga_write("[ATA] Initializing primary channel...\n");
-
     /* 主盘 */
     ata_present = ata_identify(ATA_DRIVE_MASTER, &ata_sector_count);
     if (ata_present) {
-        vga_write("[ATA] Master: sectors=");
+        vga_write("[ATA] Master: ");
         vga_write_hex(ata_sector_count);
-        vga_write(" (PIO mode)\n");
+        vga_write(" sectors\n");
     } else {
-        vga_write("[ATA] No master device (DRQ timeout).\n");
+        vga_write("[ATA] No master device.\n");
     }
 
     /* 从盘（挂第二块盘/非 FAT 测试盘时用） */
     ata_slave_present = ata_identify(ATA_DRIVE_SLAVE, &ata_slave_sector_count);
     if (ata_slave_present) {
-        vga_write("[ATA] Slave: sectors=");
+        vga_write("[ATA] Slave: ");
         vga_write_hex(ata_slave_sector_count);
-        vga_write(" (PIO mode)\n");
+        vga_write(" sectors\n");
     }
 
     return ata_present;

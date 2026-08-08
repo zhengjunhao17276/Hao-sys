@@ -59,8 +59,6 @@ static void free_pt(uint32_t* pt) {
 
 /* 初始化分页：身份映射全物理内存，写 CR3 并打开 CR0.PG */
 void vmm_init(void) {
-    vga_write("[VMM] Initializing paging...\n");
-
     zero_memory(kernel_page_directory, sizeof(kernel_page_directory));
 
     size_t total_pages = pmm_get_memory_size() / 4096;
@@ -72,12 +70,6 @@ void vmm_init(void) {
     /* 每张页表管 4MB，页目录一共 1024 个槽 */
     uint32_t num_page_tables = (total_pages + 1023) / 1024;
     if (num_page_tables > 1024) num_page_tables = 1024;
-
-    vga_write("[VMM] Mapping ");
-    vga_write_hex(total_pages * 4096 / 1024);
-    vga_write(" KB using ");
-    vga_write_hex(num_page_tables);
-    vga_write(" page tables.\n");
 
     for (uint32_t i = 0; i < num_page_tables; i++) {
 
@@ -198,10 +190,6 @@ bool vmm_map_page(uint32_t* dir, uint32_t virt_addr, uint32_t phys_addr, uint32_
 
         set_entry(&dir[pd_idx], (uint32_t)pt, pde_flags);
 
-        vga_write("[VMM] Allocated new page table, PDE flags=0x");
-        vga_write_hex(pde_flags);
-        vga_write("\n");
-
     } else {
         if (flags & PAGE_USER) {
             /* ⚠️ 共享内核页表绝不能加 USER 位，否则物理内存对用户态开放 */
@@ -219,7 +207,6 @@ bool vmm_map_page(uint32_t* dir, uint32_t virt_addr, uint32_t phys_addr, uint32_
             if (is_kernel) return false;
 
             dir[pd_idx] |= PAGE_USER;
-            vga_write("[VMM] Added USER bit to existing PDE\n");
         }
 
         uint32_t pt_phys = dir[pd_idx] & 0xFFFFF000;

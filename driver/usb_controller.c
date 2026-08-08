@@ -909,8 +909,6 @@ static void probe_controllers(void) {
 
 /* USB 子系统入口：扫控制器 → 逐个初始化（内含枚举）→ 子模块认领 */
 void usb_init(void) {
-    vga_write("[USB] Initializing...\n");
-
     probe_controllers();
     if (hc_count == 0) {
         vga_write("[USB] No UHCI controller.\n");
@@ -925,8 +923,6 @@ void usb_init(void) {
     /* 枚举在 uhci_init 里完成，这里让子模块认领设备 */
     usb_hid_init();
     usb_mass_storage_init();
-
-    vga_write("[USB] Init done.\n");
 }
 
 /*

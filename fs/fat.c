@@ -82,9 +82,6 @@ static fat_type_t detect_fat_type(fat_fs_t* fs) {
     uint32_t data_sectors =
         total_sectors_used - (fs->bpb.reserved_sectors + fs->bpb.num_fats * fat_size_used + root_dir_sectors_calc);
     uint32_t total_clusters = data_sectors / fs->bpb.sectors_per_cluster;
-    vga_write("[FAT] Detected total clusters: ");
-    vga_write_hex(total_clusters);
-    vga_write("\n");
     if (total_clusters < 4085) return FAT12;
     else if (total_clusters < 65525) return FAT16;
     else return FAT32;
@@ -114,28 +111,6 @@ static bool fat_bpb_load(fat_fs_t* fs) {
     fat_bpb_t* b = (fat_bpb_t*)fs->sector_buffer;
     fs->bpb = *b;
 
-    vga_write("[FAT] BPB: bytes_per_sector=");
-    vga_write_hex(fs->bpb.bytes_per_sector);
-    vga_write(" sectors_per_cluster=");
-    vga_write_hex(fs->bpb.sectors_per_cluster);
-    vga_write(" reserved_sectors=");
-    vga_write_hex(fs->bpb.reserved_sectors);
-    vga_write(" num_fats=");
-    vga_write_hex(fs->bpb.num_fats);
-    vga_write(" root_entry_count=");
-    vga_write_hex(fs->bpb.root_entry_count);
-    vga_write(" total_sectors_16=");
-    vga_write_hex(fs->bpb.total_sectors_16);
-    vga_write(" total_sectors_32=");
-    vga_write_hex(fs->bpb.total_sectors_32);
-    vga_write(" fat_size_16=");
-    vga_write_hex(fs->bpb.fat_size_16);
-    vga_write(" fat_size_32=");
-    vga_write_hex(fs->bpb.fat_size_32);
-    vga_write(" fs_type='");
-    for (int i=0; i<8; i++) vga_putchar(fs->bpb.fs_type[i]);
-    vga_write("'\n");
-
     if (fs->sector_buffer[510] != 0x55 || fs->sector_buffer[511] != 0xAA) {
         vga_write("[FAT] Invalid boot sector signature (0x55AA missing).\n");
         return false;
@@ -147,13 +122,21 @@ static bool fat_bpb_load(fat_fs_t* fs) {
     else if (memcmp(fs->bpb.fs_type, "FAT32", 5) == 0) fs->fs_type = FAT32;
 
     if (fs->fs_type == FAT_UNKNOWN) {
-        vga_write("[FAT] String match failed, using numerical detection.\n");
         fs->fs_type = detect_fat_type(fs);
     }
     if (fs->fs_type == FAT_UNKNOWN) {
         vga_write("[FAT] Unrecognized filesystem.\n");
         return false;
     }
+
+    vga_write("[FAT] ");
+    switch (fs->fs_type) {
+        case FAT12: vga_write("FAT12"); break;
+        case FAT16: vga_write("FAT16"); break;
+        case FAT32: vga_write("FAT32"); break;
+        default:    vga_write("?"); break;
+    }
+    vga_write(" filesystem\n");
 
     fs->bytes_per_sector    = fs->bpb.bytes_per_sector;
     fs->sectors_per_cluster = fs->bpb.sectors_per_cluster;
@@ -170,11 +153,6 @@ static bool fat_bpb_load(fat_fs_t* fs) {
     }
 
     fs->initialized = true;
-    vga_write("[FAT] Detected ");
-    if (fs->fs_type == FAT12) vga_write("FAT12");
-    else if (fs->fs_type == FAT16) vga_write("FAT16");
-    else if (fs->fs_type == FAT32) vga_write("FAT32");
-    vga_write(" filesystem.\n");
     return true;
 }
 

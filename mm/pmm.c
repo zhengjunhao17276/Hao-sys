@@ -67,20 +67,9 @@ static void mark_region(uintptr_t start, size_t length, bool available) {
 void pmm_init(uint32_t info_addr) {
     multiboot_info_t *info = (multiboot_info_t*)info_addr;
 
-    vga_write("[PMM] Initializing physical memory manager...\n");
-
-    vga_write("[PMM] Multiboot flags: 0x");
-    vga_write_hex(info->flags);
-    vga_write("\n");
-
     /* 先用 mem_lower+mem_upper 拿总量，MMAP 后面再细化 */
     uint32_t mem_lower = info->mem_lower;   /* 单位：KB */
     uint32_t mem_upper = info->mem_upper;   /* 单位：KB */
-    vga_write("[PMM] mem_lower: ");
-    vga_write_hex(mem_lower);
-    vga_write(" KB, mem_upper: ");
-    vga_write_hex(mem_upper);
-    vga_write(" KB\n");
 
     uint32_t total_kb = mem_lower + mem_upper;
     if (total_kb == 0) {
@@ -91,8 +80,7 @@ void pmm_init(uint32_t info_addr) {
 
     total_memory = total_kb * 1024;          /* KB → 字节 */
     total_pages  = total_memory / 4096;      /* 总页数 */
-
-    vga_write("[PMM] Total memory (from mem_lower+mem_upper): ");
+    vga_write("[PMM] Memory: ");
     vga_write_hex(total_kb);
     vga_write(" KB\n");
 
@@ -111,7 +99,6 @@ void pmm_init(uint32_t info_addr) {
 
     /* MMAP 能标出低端 1MB 里的可用空隙，有就给补上 */
     if (info->flags & MULTIBOOT_MMAP) {
-        vga_write("[PMM] Also processing MMAP for additional regions.\n");
         uint8_t *mmap_ptr = (uint8_t*)info->mmap_addr;
         uint8_t *mmap_end = mmap_ptr + info->mmap_length;
 
@@ -144,15 +131,11 @@ void pmm_init(uint32_t info_addr) {
     }
 
 
-    /* 先统计一遍看看，仅调试用 */
+    /* 统计空闲页（最终打印 + 无页可用的 FATAL 检查） */
     free_pages = 0;
     for (size_t i = 0; i < total_pages; i++) {
         if (get_page_bit(i)) free_pages++;
     }
-    vga_write("[PMM] Free pages (before reserving kernel): ");
-    vga_write_hex(free_pages);
-    vga_write("\n");
-
 
     /* 内核镜像 [1MB, _end) 这段不能分出去 */
     size_t kernel_start_idx = addr_to_index(0x100000);
@@ -177,7 +160,7 @@ void pmm_init(uint32_t info_addr) {
         }
     }
 
-    vga_write("[PMM] Final free pages: ");
+    vga_write("[PMM] Free pages: ");
     vga_write_hex(free_pages);
     vga_write("\n");
 
@@ -195,9 +178,6 @@ void pmm_init(uint32_t info_addr) {
             free_list_head = (uint32_t)i;
         }
     }
-    vga_write("[PMM] Free list built, head page index=");
-    vga_write_hex(free_list_head);
-    vga_write("\n");
 }
 
 

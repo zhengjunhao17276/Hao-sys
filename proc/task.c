@@ -133,8 +133,6 @@ static void init_gdt_tss(void) {
 
     /* 加载任务寄存器（TR）指向 GDT[5] = TSS */
     __asm__ volatile ("ltr %%ax" : : "a" (0x28));
-
-    vga_write("[TASK] GDT and TSS initialized.\n");
 }
 
 /* 释放任务资源（用户页/内核栈/PCB）。调用前须确保 task 已摘链 */
@@ -193,7 +191,6 @@ static void idle_loop(void) {
  * ⚠️ 修复：idle 以前只有空 PCB（esp=0/eip=0），真切到它时 switch_to
  * 从地址 0 弹栈直接崩；现在用 task_create 给它完整内核栈 + idle_loop */
 void task_init(void) {
-    vga_write("[TASK] Initializing task manager...\n");
     init_gdt_tss();
 
     /* task_create 顺便把 switch_to 需要的初始上下文布好了 */
@@ -210,7 +207,7 @@ void task_init(void) {
     current_task = idle;
     idle_task = idle;
 
-    vga_write("[TASK] Idle task created (PID=1).\n");
+    vga_write("[TASK] Scheduler ready\n");
 }
 
 /* 创建内核任务：分配 PCB + 内核栈，栈上布好 [popa 帧][EBP=0][entry]，
@@ -264,12 +261,6 @@ task_t* task_create(const char* name, void (*entry)(void)) {
     /* 插入链表头 */
     task->next = task_list;
     task_list = task;
-
-    vga_write("[TASK] Created task '");
-    vga_write(name);
-    vga_write("' (PID=");
-    vga_write_hex(task->pid);
-    vga_write(")\n");
 
     return task;
 }
@@ -343,12 +334,6 @@ task_t* task_create_user(const char* name, void* entry, void* stack) {
     /* 插入链表头 */
     task->next = task_list;
     task_list = task;
-
-    vga_write("[TASK] User stack frame: SS=0x23 ESP=0x");
-    vga_write_hex((uint32_t)stack + PAGE_SIZE);
-    vga_write(" EFLAGS=0x200 CS=0x1B EIP=0x");
-    vga_write_hex((uint32_t)entry);
-    vga_write("\n");
 
     return task;
 }

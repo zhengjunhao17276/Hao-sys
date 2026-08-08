@@ -40,12 +40,8 @@ static block_dev_t ata_slave_block_dev = { "/dev/ata1", ata_blk_read_slave, ata_
 /* @magic/info_addr 由 GRUB 传入；返回磁盘上是否有 FAT 文件系统。
  * 顺序依赖：PCI 扫描必须在 USB 之前（USB 控制器靠 PCI 发现）。 */
 bool kinit(uint32_t magic, uint32_t info_addr) {
+    (void)magic;   /* 启动日志已精简，魔数/地址不再展示 */
     vga_init();
-    vga_write("Multiboot magic: ");
-    vga_write_hex(magic);
-    vga_write("   info_addr: ");
-    vga_write_hex(info_addr);
-    vga_write("\n\n");
 
     vga_write("[STEP 2] PMM init...\n");
     pmm_init(info_addr);
@@ -108,10 +104,6 @@ extern void switch_to_user(task_t* next);
  * EFLAGS IF=1（用户态要能收中断）。 */
 static void load_and_run_shell(void) {
 
-    vga_write("[Shell] Free pages: ");
-    vga_write_hex(pmm_get_free_pages());
-    vga_write("\n");
-
     /* 1. 搜索 SHELL.BIN（Linux 布局：/bin/SHELL.BIN） */
     /* vfs_resolve 把 "/BIN/SHELL.BIN" 路由到根挂载，sub="BIN/SHELL.BIN"；
      * fat_find_file 逐段解析子目录，最终转 8.3（"SHELL   BIN"）匹配 */
@@ -123,9 +115,6 @@ static void load_and_run_shell(void) {
         vga_write("[Shell] /BIN/SHELL.BIN not found.\n");
         return;
     }
-    vga_write("[Shell] Found SHELL.BIN, size=");
-    vga_write_hex(entry.file_size);
-    vga_write(" bytes.\n");
 
     /* 2. 分配代码物理页
      * ⚠️ 额外映射 64KB .bss 区（BSS_PAGES 页）：用户程序的 static
@@ -144,11 +133,6 @@ static void load_and_run_shell(void) {
         vga_write("[Shell] Failed to allocate code page.\n");
         return;
     }
-    vga_write("[Shell] Code phys=");
-    vga_write_hex(code_phys);
-    vga_write(" pages=");
-    vga_write_hex(code_pages);
-    vga_write("\n");
 
     /* 3. 虚拟地址与用户任务 */
     /* ⚠️ 用户任务有独立页目录（复制内核页表），但内核身份映射覆盖
@@ -177,9 +161,6 @@ static void load_and_run_shell(void) {
         pmm_free_page((void*)code_phys);
         return;
     }
-    vga_write("[Shell] Code mapped at ");
-    vga_write_hex(code_virt);
-    vga_write("\n");
 
     /* ⚠️ 一次性分配所有额外页，失败时统一释放，不再泄漏 */
     uint32_t extra_phys[80];
@@ -231,9 +212,6 @@ static void load_and_run_shell(void) {
         vga_write("[Shell] Load failed!\n");
         while(1) __asm__ volatile("hlt");
     }
-    vga_write("[Shell] Loaded ");
-    vga_write_hex(loaded);
-    vga_write(" bytes. Executing...\n");
 
     /* 6. 用户栈 */
     /* ⚠️ 栈要 2 页：main 的 x86 序言（lea 4(%esp),%ecx; and $-16,%esp;
@@ -249,9 +227,6 @@ static void load_and_run_shell(void) {
         pmm_free_page((void*)code_phys);
         return;
     }
-    vga_write("[Shell] Stack phys=");
-    vga_write_hex(stack_phys);
-    vga_write("\n");
 
     if (!vmm_map_page(target_dir, stack_virt, stack_phys, PAGE_WRITE | PAGE_USER)) {
         vga_write("[Shell] Failed to map stack page at ");
@@ -274,9 +249,6 @@ static void load_and_run_shell(void) {
         pmm_free_page((void*)code_phys);
         return;
     }
-    vga_write("[Shell] Stack mapped at ");
-    vga_write_hex(stack_virt);
-    vga_write(" (+1 guard page)\n");
 
     /* 登记用户页供退出时回收（代码页 + 用户栈页） */
     shell_task->user_virt_count = 0;
@@ -289,9 +261,9 @@ static void load_and_run_shell(void) {
     if (shell_task->user_virt_count < 96) {
         shell_task->user_virt_pages[shell_task->user_virt_count++] = stack_virt + 0x1000;
     }
-    vga_write("[Shell] User task created (PID=");
+    vga_write("[Shell] OK (PID=");
     vga_write_hex(shell_task->pid);
-    vga_write(").\n");
+    vga_write(")\n");
 
     /* ⚠️ 必须让调度器知道真正在跑的是 shell。之前 current_task 一直
      * 是 idle——裸 iret 进用户态后，int 0x80/IRQ 入口的
@@ -320,10 +292,6 @@ static void load_and_run_shell(void) {
     /* ⚠️ 切 CR3 到 shell 的独立页目录（256MB 区只映射在该目录，
      * 内核目录里没有，不切会立即 #PF）。 */
     vmm_switch_directory(shell_task->page_directory);
-
-    vga_write("[Shell] Executing iret... code_virt=");
-    vga_write_hex(code_virt);
-    vga_write("\n");
 
     /* 直接内联 IRET，不经过任何函数调用 */
     __asm__ volatile (

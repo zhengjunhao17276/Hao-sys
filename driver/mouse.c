@@ -305,7 +305,6 @@ extern bool find_hid_interface(usb_hc_t *hc, uint8_t dev_addr,
 
 /* 找 HID Boot Mouse：设配置、开 Boot Protocol、提交中断传输收报告 */
 static bool usb_mouse_probe(void) {
-    vga_write("[USB Mouse] Probing...\n");
     usb_device_t *dev = usb_get_device_list();
     while (dev) {
         bool is_hid = false;
@@ -386,7 +385,6 @@ static bool usb_mouse_probe(void) {
         }
         dev = dev->next;
     }
-    vga_write("[USB Mouse] No device found.\n");
     return false;
 }
 
@@ -406,8 +404,6 @@ static void usb_get_packet(int *x, int *y, int *buttons) {
 
 /* 先 USB（支持热插拔）后 PS/2，都没有则标记不可用 */
 void mouse_init(void) {
-    vga_write("[Mouse] Initializing unified driver...\n");
-
     if (usb_mouse_probe()) {
         current_backend = BACKEND_USB;
         mouse_available = true;
@@ -423,9 +419,10 @@ void mouse_init(void) {
          * sti;hlt 休眠后，鼠标数据由 IRQ12 中断喂给解析器（
          * ps2_mouse_irq_handler），不再需要键盘排空循环代劳。
          * 键盘 IRQ1 与鼠标 IRQ12 由 PS/2 控制器按来源区分，互不误读。 */
-        vga_write("[Mouse] Using PS/2 backend (interrupt-driven).\n");
         return;
     }
+
+    /* PS/2 后端初始化失败才走到这里：标记不可用 */
 
     mouse_available = false;
     vga_write("[Mouse] No mouse found.\n");

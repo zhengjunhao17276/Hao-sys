@@ -117,7 +117,6 @@ static void usb_kb_callback(usb_urb_t *urb) {
 }
 
 void usb_keyboard_init(void) {
-    vga_write("[USB Keyboard] Probing...\n");
 
     usb_device_t *dev = usb_get_device_list();
     while (dev && !usb_kb_present) {
@@ -177,8 +176,9 @@ void usb_keyboard_init(void) {
         dev = dev->next;
     }
 
-    if (!usb_kb_present)
-        vga_write("[USB Keyboard] No USB keyboard (PS/2 in use).\n");
+    if (!usb_kb_present) {
+        /* 无 USB 键盘：不输出，PS/2 键盘兜底 */
+    }
 }
 
 bool usb_keyboard_has_char(void) {

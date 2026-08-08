@@ -16,6 +16,16 @@
 
 /* 已扫描总线标记（最多 256 条总线） */
 static bool scanned_buses[256];
+static uint32_t pci_device_count = 0;   /* 枚举到的设备数（启动日志用） */
+
+/* 十进制输出（启动日志计数用，内核无现成十进制打印） */
+static void pci_print_dec(uint32_t v) {
+    char buf[12];
+    int i = 0;
+    if (v == 0) { vga_putchar('0'); return; }
+    while (v > 0) { buf[i++] = '0' + (v % 10); v /= 10; }
+    while (i > 0) vga_putchar(buf[--i]);
+}
 
 /* 前向声明 */
 static void pci_scan_bus(int bus);
@@ -46,46 +56,21 @@ void pci_write_config(uint8_t bus, uint8_t slot, uint8_t func, uint8_t offset, u
 static void scan_function(uint8_t bus, uint8_t slot, uint8_t func) {
     uint32_t vid = pci_read_config(bus, slot, func, 0) & 0xFFFF;   /* VID = 存在性判据 */
     if (vid == 0xFFFF) return;
+    pci_device_count++;
 
-    uint32_t dev = (pci_read_config(bus, slot, func, 0) >> 16) & 0xFFFF;
     uint32_t class_rev = pci_read_config(bus, slot, func, 0x08);
     uint8_t class = (class_rev >> 24) & 0xFF;
     uint8_t subclass = (class_rev >> 16) & 0xFF;
-
-    vga_write("  Bus ");
-    vga_write_hex(bus);
-    vga_write(" Slot ");
-    vga_write_hex(slot);
-    vga_write(" Func ");
-    vga_write_hex(func);
-    vga_write(": VID ");
-    vga_write_hex(vid);
-    vga_write(" DEV ");
-    vga_write_hex(dev);
-    vga_write(" Class ");
-    vga_write_hex(class);
-    vga_write(" Sub ");
-    vga_write_hex(subclass);
-    vga_write("\n");
 
     if (class == 0x06 && subclass == 0x04) {
         /* 桥：读 0x18 的次总线号（bit 8-15） */
         uint32_t bridge_reg = pci_read_config(bus, slot, func, 0x18);
         uint8_t secondary_bus = (bridge_reg >> 8) & 0xFF;
-        uint8_t subordinate_bus = (bridge_reg >> 16) & 0xFF;
-
-        vga_write("    -> PCI-PCI bridge to bus ");
-        vga_write_hex(secondary_bus);
-        vga_write(" (subordinate ");
-        vga_write_hex(subordinate_bus);
-        vga_write(")\n");
 
         /* 防环：次总线号不能等于当前总线，且不能重复扫描 */
         if (secondary_bus != bus && !scanned_buses[secondary_bus]) {
             scanned_buses[secondary_bus] = true;
             pci_scan_bus(secondary_bus);
-        } else {
-            vga_write("    -> Skipping (invalid or already scanned)\n");
         }
     }
 }
@@ -95,10 +80,6 @@ static void pci_scan_bus(int bus) {
     if (bus < 0 || bus >= 256) return;
     if (scanned_buses[bus]) return;
     scanned_buses[bus] = true;
-
-    vga_write("[PCI] Scanning bus ");
-    vga_write_hex(bus);
-    vga_write("...\n");
 
     for (int slot = 0; slot < 32; slot++) {
         uint32_t vid = pci_read_config(bus, slot, 0, 0) & 0xFFFF;
@@ -117,10 +98,12 @@ static void pci_scan_bus(int bus) {
 /* 从总线 0 递归枚举整个 PCI 拓扑 */
 void pci_init(void) {
     for (int i = 0; i <= 255; i++) scanned_buses[i] = false;
+    pci_device_count = 0;
 
-    vga_write("[PCI] Starting enumeration...\n");
     pci_scan_bus(0);
-    vga_write("[PCI] Enumeration complete.\n");
+    vga_write("[PCI] ");
+    pci_print_dec(pci_device_count);
+    vga_write(" device(s)\n");
 }
 
 /* pci_init 的别名 */
