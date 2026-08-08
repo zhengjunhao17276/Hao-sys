@@ -110,7 +110,7 @@ static void load_and_run_shell(void) {
      * ⚠️ 额外映射 64KB .bss 区（BSS_PAGES 页）：用户程序的 static
      * 大缓冲（如 FM 复制用的 64KB）落在 .bss，扁平二进制不含 .bss，
      * 不映射会 #PF。 */
-    #define BSS_PAGES 56   /* .bss 上限 224KB：FM 60KB 复制缓冲 + vi 的 池/撤销/输出缓冲 */
+    #define BSS_PAGES 24   /* .bss 上限 96KB（shell 自身静态缓冲） */
     uint32_t file_pages = (entry.file_size + 4095) / 4096;
     uint32_t code_pages = file_pages + BSS_PAGES;
     if (file_pages > 64) {
