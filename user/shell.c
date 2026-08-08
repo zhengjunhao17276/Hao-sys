@@ -617,33 +617,54 @@ static const char* resolve_path(const char* in, char* out, unsigned int out_size
     out[o] = '\0';
     return out;
 }
+/* cmd_help - 两列排版帮助：先清屏，整屏可见不滚走 */
 static void cmd_help(const char* args) { (void)args;
-    write("\nHaoOS Shell v0.1 - Available commands:\n");
-    write("  help      - Show this help message\n");
-    write("  echo      - Echo text back\n");
-    write("  clear     - Clear the screen\n");
-    write("  tasks     - Show running tasks\n");
-    write("  mouse     - Show mouse position\n");
-    write("  save      - Save text to a file (overwrites)\n");
-    write("  cat       - Show file contents\n");
-    write("  mkdir     - Create a directory\n");
-    write("  ls        - List directory contents (ls -l = long)\n");
-    write("  id        - Show uid/gid/euid/egid\n");
-    write("  chmod     - Change permissions (chmod <mode> <file>)\n");
-    write("  chown     - Change owner (chown <uid> <file>, root only)\n");
-    write("  stat      - Show file mode/uid/gid/size\n");
-    write("  setuid    - Switch user (setuid <uid>, root only)\n");
-    write("  cd        - Change directory (cd <path>, or cd for root)\n");
-    write("  pwd       - Print working directory\n");
-    write("  rm        - Delete a file\n");
-    write("  mount     - Mount a device (mount <device> <point>)\n");
-    write("  umount    - Unmount a filesystem (umount <point>)\n");
-    write("  devices   - List devices and mounts\n");
-    write("  time      - Show date and time\n");
-    write("  uptime    - Show time since boot\n");
-    write("  settings  - Open settings TUI\n");
-    write("  shutdown  - Power off the system\n");
-    write("  reboot    - Restart the system\n");
+    static const char* const hp[][2] = {
+        { "help",     "this help" },
+        { "echo",     "echo text" },
+        { "clear",    "clear screen" },
+        { "tasks",    "task list" },
+        { "mouse",    "mouse position" },
+        { "save",     "save text to file" },
+        { "cat",      "show file" },
+        { "mkdir",    "create dir" },
+        { "ls",       "list (-l long)" },
+        { "id",       "uid/gid/euid/egid" },
+        { "chmod",    "change mode" },
+        { "chown",    "change owner" },
+        { "stat",     "file meta" },
+        { "setuid",   "switch user" },
+        { "cd",       "change dir" },
+        { "pwd",      "print cwd" },
+        { "rm",       "delete file" },
+        { "mount",    "mount device" },
+        { "umount",   "unmount" },
+        { "devices",  "devices & mounts" },
+        { "time",     "date & time" },
+        { "uptime",   "uptime" },
+        { "settings", "settings TUI" },
+        { "shutdown", "power off" },
+        { "reboot",   "restart" },
+    };
+    enum { N = 25, ROWS = (N + 1) / 2 };
+    clear_screen();
+    write("HaoOS Shell v0.1 - commands:\n");
+    for (int i = 0; i < ROWS; i++) {
+        /* 左列：2 空格 + 名(14) + 说明，补齐到 40 列 */
+        write("  ");
+        write(hp[i][0]);
+        { int pad = 14 - (int)strlen(hp[i][0]); while (pad-- > 0) putchar(' '); }
+        write(hp[i][1]);
+        { int pad = 38 - (14 + (int)strlen(hp[i][1])); while (pad-- > 0) putchar(' '); }
+        /* 右列：名(14) + 说明 */
+        int r = i + ROWS;
+        if (r < N) {
+            write(hp[r][0]);
+            { int pad = 14 - (int)strlen(hp[r][0]); while (pad-- > 0) putchar(' '); }
+            write(hp[r][1]);
+        }
+        write("\n");
+    }
     write("\n");
 }
 
