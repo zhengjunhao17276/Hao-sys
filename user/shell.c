@@ -45,6 +45,7 @@
 #define SYS_STAT       44  /* 取元数据（ebx=路径, ecx=stat_info_t*） */
 #define SYS_CHMOD      45  /* 改权限（ebx=路径, ecx=mode） */
 #define SYS_CHOWN      46  /* 改属主（ebx=路径, ecx=uid, edx=gid） */
+#define SYS_POWEROFF   47  /* 关机（不返回） */
 
 /* stat 结果（与内核 stat_info_t 一致，16 字节） */
 struct stat_info {
@@ -122,9 +123,9 @@ static void write(const char* s) {
     __asm__ volatile ("int $0x80" : : "a"(3), "b"((unsigned int)s) : "memory");
 }
 
-/* exit - 通过系统调用退出程序 */
-static void exit(int status) {
-    __asm__ volatile ("int $0x80" : : "a"(4), "b"(status) : "memory");
+/* poweroff_sys - 关机系统调用（不返回） */
+static void poweroff_sys(void) {
+    __asm__ volatile ("int $0x80" : : "a"(SYS_POWEROFF) : "memory");
 }
 
 /* yield - 通过系统调用让出 CPU（协作式调度测试） */
@@ -645,7 +646,7 @@ static void cmd_help(const char* args) { (void)args;
     write("  time      - Show date and time\n");
     write("  uptime    - Show time since boot\n");
     write("  settings  - Open settings TUI\n");
-    write("  exit      - Halt the system\n");
+    write("  shutdown  - Power off the system\n");
     write("\n");
 }
 
@@ -666,10 +667,12 @@ static void cmd_tasks(const char* args) { (void)args;
     tasks_sys();
 }
 
-/* cmd_exit - 关闭系统（暂停 CPU） */
-static void cmd_exit(const char* args) { (void)args;
-    write("Halting system.\n");
-    exit(0);
+/* cmd_shutdown - 关机（替代原 exit：QEMU 直接退出，真机停在 HLT） */
+static void cmd_shutdown(const char* args) { (void)args;
+    write("Shutting down...\n");
+    poweroff_sys();
+    /* 理论不可达：内核关机不返回 */
+    while (1) {}
 }
 
 /* cmd_time - 显示当前日期时间（RTC） */
@@ -1762,7 +1765,7 @@ static command_t commands[] = {
     { "settings", cmd_settings },
     { "set",   cmd_settings },
     { "fm",    cmd_fm },
-    { "exit",  cmd_exit },
+    { "shutdown", cmd_shutdown },
     { NULL,    NULL }
 };
 

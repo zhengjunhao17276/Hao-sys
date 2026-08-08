@@ -5,6 +5,7 @@
 
 #include "../include/syscall/syscall.h"
 #include "../include/driver/vga.h"
+#include "../include/driver/io.h"
 #include "../include/driver/keyboard.h"
 #include "../include/driver/mouse.h"
 #include "../include/driver/ata.h"
@@ -294,6 +295,17 @@ static int sys_mkdir(uint32_t path) {
     uint32_t cgid = current_task ? current_task->gid : 0;
     fat_set_file_meta(fs, sub, S_IFDIR | 0755, (uint16_t)cuid, (uint16_t)cgid);
     return 0;
+}
+
+/* 关机：先试 QEMU/Bochs 电源控制端口，再 cli+hlt 兜底（真机停在 HLT） */
+static void sys_poweroff(void) {
+    /* QEMU/Bochs 专有电源端口（0x604 写 0x2000 触发虚拟机关机；
+     * 真机上该端口通常不存在，写入无副作用） */
+    outw(0x604, 0x2000);
+
+    /* 兜底：关中断 + HLT，等同断电前状态 */
+    __asm__ volatile ("cli");
+    for (;;) __asm__ volatile ("hlt");
 }
 
 /* ---- 凭据：uid/gid/euid/egid ---- */
@@ -718,6 +730,12 @@ void syscall_dispatcher(regs_t *regs) {
         case SYS_CHOWN:
             /* ebx = 路径, ecx = uid, edx = gid */
             ret = sys_chown(regs->ebx, regs->ecx, regs->edx);
+            break;
+
+        case SYS_POWEROFF:
+            /* 关机：不返回 */
+            sys_poweroff();
+            ret = 0;
             break;
 
         default:

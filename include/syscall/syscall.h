@@ -52,6 +52,7 @@
 #define SYS_STAT       44  /* 取文件元数据（ebx=路径, ecx=stat_info_t*） */
 #define SYS_CHMOD      45  /* 改权限（ebx=路径, ecx=mode；需属主或 root） */
 #define SYS_CHOWN      46  /* 改属主/组（ebx=路径, ecx=uid, edx=gid；仅 root；0xFFFF=不改） */
+#define SYS_POWEROFF   47  /* 关机（不返回） */
 
 /* stat 结果（SYS_STAT 写入，16 字节；用户态镜像同名结构） */
 typedef struct {
