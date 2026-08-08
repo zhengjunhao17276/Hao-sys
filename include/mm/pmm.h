@@ -9,8 +9,8 @@
 #include <stdint.h>
 #include <stddef.h>
 
-/* 从 Multiboot 信息初始化 PMM（0 空闲页会停机） */
-void pmm_init(uint32_t info_addr);
+/* 从 Multiboot 信息初始化 PMM（0 空闲页会停机）；magic 区分 MB1/MB2 */
+void pmm_init(uint32_t magic, uint32_t info_addr);
 
 /* 分配一页（不清零），失败返回 NULL */
 void* pmm_alloc_page(void);

@@ -97,7 +97,9 @@ static uint32_t mbr_find_fat_partition(const uint8_t* mbr) {
         uint8_t type = e[4];
         if (type == 0x00 || type == 0x05 || type == 0x0F) continue;  /* 空槽/扩展分区 */
         if (type == 0x01 || type == 0x04 || type == 0x06 || type == 0x0E ||
-            type == 0x0B || type == 0x0C) {
+            type == 0x0B || type == 0x0C || type == 0xEF) {
+            /* 0xEF = EFI System Partition（ESP），内容也是 FAT；
+             * 允许 HaoOS 直接挂载自带 EFI 引导的整盘镜像 */
             return (uint32_t)e[8] | ((uint32_t)e[9] << 8) |
                    ((uint32_t)e[10] << 16) | ((uint32_t)e[11] << 24);
         }
@@ -153,15 +155,16 @@ bool fat_mount(fat_fs_t* fs, const block_dev_t* dev) {
     fs->dev = dev;
     fs->base_lba = 0;
 
-    /* 尝试 1：直格盘（LBA 0 = FAT BPB） */
+    /* 直格盘（LBA 0 = FAT BPB）。若 LBA 0 是 MBR 分区表（有 FAT 分区），
+     * 跳过直格尝试直接挂分区——避免把 MBR 当 BPB 解析的噪音/误判 */
     if (!fat_dev_read(fs, 0, fs->sector_buffer)) {
         vga_write("[FAT] Failed to read boot sector.\n");
         return false;
     }
-    if (fat_bpb_load(fs)) return true;
-
-    /* 尝试 2：MBR 分区盘（LBA 0 = MBR，FAT 在分区起始） */
     uint32_t part_lba = mbr_find_fat_partition(fs->sector_buffer);
+    if (part_lba == 0 && fat_bpb_load(fs)) return true;
+
+    /* MBR 分区盘：从 FAT 分区起始 LBA 挂载（base_lba 偏移） */
     if (part_lba != 0) {
         fs->base_lba = part_lba;
         if (fat_dev_read(fs, 0, fs->sector_buffer) && fat_bpb_load(fs)) return true;

@@ -83,6 +83,27 @@ probe_fs_t fs_probe(const block_dev_t* dev) {
         if (t != FS_UNKNOWN) return t;
     }
 
+    /* MBR 分区盘：扇区 0 是 MBR，扫描分区表找 FAT 类型分区，探测其引导扇区 */
+    if (have0 && s0[510] == 0x55 && s0[511] == 0xAA) {
+        for (int i = 0; i < 4; i++) {
+            const uint8_t* e = s0 + 446 + i * 16;
+            uint8_t ptype = e[4];
+            if (ptype == 0x01 || ptype == 0x04 || ptype == 0x06 || ptype == 0x0E ||
+                ptype == 0x0B || ptype == 0x0C || ptype == 0xEF) {
+                uint32_t plba = (uint32_t)e[8] | ((uint32_t)e[9] << 8) |
+                                ((uint32_t)e[10] << 16) | ((uint32_t)e[11] << 24);
+                uint8_t ps[512];
+                if (dev->read_sector(plba, ps)) {
+                    if (memcmp(ps + 54, "FAT12   ", 8) == 0) return FS_FAT12;
+                    if (memcmp(ps + 54, "FAT16   ", 8) == 0) return FS_FAT16;
+                    if (memcmp(ps + 54, "FAT32   ", 8) == 0) return FS_FAT32;
+                    probe_fs_t t = probe_fat_numeric(ps);
+                    if (t != FS_UNKNOWN) return t;
+                }
+            }
+        }
+    }
+
     /* ext2/3/4：超级块在扇区 2 偏移 56（魔数 0xEF53） */
     if (dev->read_sector(2, s2)) {
         uint16_t magic = (uint16_t)s2[56] | ((uint16_t)s2[57] << 8);

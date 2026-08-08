@@ -43,7 +43,7 @@ bool kinit(uint32_t magic, uint32_t info_addr) {
     (void)magic;   /* 启动日志已精简，魔数/地址不再展示 */
     vga_init();
 
-    pmm_init(info_addr);
+    pmm_init(magic, info_addr);
     vmm_init();
 
     idt_init();

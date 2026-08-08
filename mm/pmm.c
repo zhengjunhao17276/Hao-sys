@@ -64,13 +64,39 @@ static void mark_region(uintptr_t start, size_t length, bool available) {
 
 
 /* 初始化 PMM：取内存总量，建位图，标记可用/保留区，最后把空闲页挂链表 */
-void pmm_init(uint32_t info_addr) {
-    multiboot_info_t *info = (multiboot_info_t*)info_addr;
+/* Multiboot2 魔数：GRUB EFI 走 multiboot2 协议时 eax 传这个 */
+#define MULTIBOOT2_MAGIC 0x36D76289
+
+void pmm_init(uint32_t magic, uint32_t info_addr) {
+    uint32_t mem_lower, mem_upper;
+    multiboot_info_t *info = NULL;   /* 仅 MB1 路径使用 */
+
+    if (magic == MULTIBOOT2_MAGIC) {
+        /* MB2 info 结构：u32 total_size, u32 reserved，随后是标签流。
+         * 标签：u32 type, u32 size, 数据...；type 4 = basic meminfo。
+         * 只取基本内存信息，MMAP 暂不解析（QEMU 下 mem_lower/upper 可靠）。 */
+        uint32_t total_size = *(volatile uint32_t*)info_addr;
+        uint32_t p = info_addr + 8;
+        mem_lower = 0;
+        mem_upper = 0;
+        while (p + 8 <= info_addr + total_size) {
+            uint32_t type = *(volatile uint32_t*)p;
+            uint32_t size = *(volatile uint32_t*)(p + 4);
+            if (type == 0 || size < 8) break;      /* 结束标签/非法 */
+            if (type == 4 && size >= 16) {
+                mem_lower = *(volatile uint32_t*)(p + 8);
+                mem_upper = *(volatile uint32_t*)(p + 12);
+            }
+            p += (size + 7) & ~7u;                 /* 标签 8 字节对齐 */
+        }
+    } else {
+        /* MB1 info */
+        info = (multiboot_info_t*)info_addr;
+        mem_lower = info->mem_lower;
+        mem_upper = info->mem_upper;
+    }
 
     /* 先用 mem_lower+mem_upper 拿总量，MMAP 后面再细化 */
-    uint32_t mem_lower = info->mem_lower;   /* 单位：KB */
-    uint32_t mem_upper = info->mem_upper;   /* 单位：KB */
-
     uint32_t total_kb = mem_lower + mem_upper;
     if (total_kb == 0) {
         /* 拿不到内存信息就给个保守值，免得后面除零 */
@@ -94,8 +120,9 @@ void pmm_init(uint32_t info_addr) {
      * 先假设 1MB 以上全可用，后面再按 MMAP 和内核占用往回抠 */
     mark_region(0x100000, total_memory - 0x100000, true);
 
-    /* MMAP 能标出低端 1MB 里的可用空隙，有就给补上 */
-    if (info->flags & MULTIBOOT_MMAP) {
+    /* MMAP 能标出低端 1MB 里的可用空隙，有就给补上（仅 MB1 路径；
+     * MB2 暂不解析 mmap，mem_lower/upper 已够用） */
+    if (magic != MULTIBOOT2_MAGIC && (info->flags & MULTIBOOT_MMAP)) {
         uint8_t *mmap_ptr = (uint8_t*)info->mmap_addr;
         uint8_t *mmap_end = mmap_ptr + info->mmap_length;
 

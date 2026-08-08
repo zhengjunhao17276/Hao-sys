@@ -8,6 +8,28 @@ align 4
     dd 0x03                ; flags：bit0 请求引导器提供内存布局信息
     dd -(0x1BADB002 + 0x03) ; checksum：magic + flags + checksum = 0
 
+; Multiboot2 头（EFI GRUB 用）：与 MB1 并存，引导器按协议自选
+; magic=0xE85250D6，架构 0=i386，checksum 使前四项之和为 0
+; 标签：信息请求（内存布局）→ 结束标签
+%define MB2_MAGIC 0xE85250D6
+%define MB2_ARCH  0
+align 8
+mb2_header_start:
+    dd MB2_MAGIC
+    dd MB2_ARCH
+    dd mb2_header_end - mb2_header_start
+    dd -(MB2_MAGIC + MB2_ARCH + (mb2_header_end - mb2_header_start))
+    ; 信息请求标签：请求 basic meminfo（type 4）
+    dw 1                     ; type = 1（information request）
+    dw 0                     ; flags
+    dd 12                    ; size = 8 + 1*4
+    dd 4                     ; 请求 basic meminfo 标签
+    ; 结束标签
+    dw 0
+    dw 0
+    dd 8
+mb2_header_end:
+
 section .text
 global _start              ; 对外导出 _start，链接脚本通过 ENTRY(_start) 引用
 extern kmain               ; 声明 C 函数 kmain，链接器会解析其地址
