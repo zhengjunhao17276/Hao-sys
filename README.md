@@ -21,15 +21,22 @@
 make -j8 CC="gcc -m32" LD="ld" OBJCOPY="objcopy"
 ```
 
-跑起来（QEMU）：
+**打包单文件可启动镜像**（手写 MBR 引导器，无需 GRUB）：
 
 ```bash
-qemu-system-i386 -kernel kernel.elf -hda disk.img -display curses -monitor none
+./make_boot.sh    # 编译 MBR 引导器（stage1 + stage2）
+./make_image.sh   # 打包 HaoOS.img（引导器 + 内核 + FAT16 根文件系统）
 ```
 
-没窗口环境就用 `-display curses`，有窗口就省略它。
+启动（QEMU）：
 
-产物：`kernel.elf`（内核镜像）、`user/shell.bin`（用户态 Shell，写进磁盘镜像）、`disk.img`（32MB FAT16 镜像，`create_disk.sh` 生成）。
+```bash
+qemu-system-i386 -hda HaoOS.img -display curses
+```
+
+也可以把 `HaoOS.img` 写入 U 盘/硬盘在真机上 BIOS 启动。没窗口环境就用 `-display curses`，有窗口就省略。
+
+产物：`kernel.elf`（内核镜像）、`user/shell.bin`（用户态 Shell）、`HaoOS.img`（**单文件可启动镜像**：MBR 引导器 + 内核 + FAT16 根文件系统）、`disk.img`（开发用 FAT16 镜像，`create_disk.sh` 生成，配 `-kernel` 启动）。
 
 ## 结构
 
@@ -41,6 +48,7 @@ Hao-sys/
 ├── syscall/      IDT + int 0x80 分发
 ├── proc/         任务调度 + 上下文切换
 ├── driver/       VGA / 键盘 / 鼠标 / ATA / PCI / USB / RTC / 蜂鸣器
+├── boot/         MBR 引导器（stage1 + stage2，nasm）
 ├── fs/           FAT + 挂载 + 文件系统识别（probe.c）
 ├── lib/          内核字符串库
 ├── user/         Shell（用户态）
