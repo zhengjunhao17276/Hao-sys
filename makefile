@@ -9,7 +9,7 @@ OBJCOPY = i686-elf-objcopy
 
 CFLAGS   = -std=c11 -ffreestanding -nostdlib -fno-stack-protector \
            -Iinclude -Wall -Wextra -fno-leading-underscore \
-           -march=i386 -mtune=generic
+           -march=i386 -mtune=generic -MMD -MP
 ASMFLAGS = -f elf32
 LDFLAGS  = -T linker.ld -m elf_i386
 
@@ -111,7 +111,7 @@ kernel.elf: $(OBJS)
 # ---------- 用户 Shell ----------
 # 先编译 .o，再链接 .elf，最后 objcopy 为纯二进制
 $(SHELL_OBJ): $(SHELL_SRC)
-	$(CC) -m32 -ffreestanding -nostdlib -fno-stack-protector -mno-red-zone -O0 -c $< -o $@
+	$(CC) -m32 -ffreestanding -nostdlib -fno-stack-protector -mno-red-zone -O0 -MMD -MP -c $< -o $@
 
 $(SHELL_ELF): $(SHELL_OBJ)
 	$(LD) -m elf_i386 -Ttext 0x10000000 -e main -o $@ $<
@@ -141,8 +141,9 @@ run-atthisconsole: kernel.elf $(DISK_IMG)
 
 # ---------- 清理 ----------
 clean:
-	rm -f *.o *.elf *.bin
+	rm -f *.o *.elf *.bin *.d
 	rm -f driver/*.o lib/*.o mm/*.o proc/*.o syscall/*.o fs/*.o user/*.o
+	rm -f driver/*.d lib/*.d mm/*.d proc/*.d syscall/*.d fs/*.d user/*.d
 	rm -f user/*.elf user/*.bin
 	@echo "[CLEAN] Removed object files, ELF, and binary files. Disk image preserved."
 
@@ -152,3 +153,6 @@ clean-all: clean
 	@echo "[CLEAN] Removed disk image too."
 
 .PHONY: all run run-atthisconsole clean clean-all
+
+# 头文件依赖（-MMD 生成，改 include 头文件自动重编对应 .c）
+-include $(OBJS:.o=.d) $(SHELL_OBJ:.o=.d)

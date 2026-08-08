@@ -11,3 +11,4 @@ usb.img
 *.swp
 *~
 .DS_Store
+*.d

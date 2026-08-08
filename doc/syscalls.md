@@ -1,6 +1,6 @@
 # HaoOS 系统调用档案
 
-HaoOS 用户态程序的唯一入口：`int 0x80`。共 33 个调用，覆盖终端输出、键盘鼠标、文件系统、系统信息四类。
+HaoOS 用户态程序的唯一入口：`int 0x80`。共 42 个调用，覆盖终端输出、键盘鼠标、文件系统、系统信息四类。
 
 ## 调用约定
 
@@ -121,6 +121,53 @@ SET:  ebx = 属性字节（如 0x0F = 黑底白字），返回 0
 ```
 
 **非阻塞**取键，无键立即返回 -1。适合 TUI 事件循环：每轮先取键，无键再去轮询鼠标。⚠️ 键盘 IRQ 被屏蔽（纯轮询模式），内核会直接查 0x64/0x60 端口。
+
+### SYS_GETUID / SYS_GETGID / SYS_GETEUID / SYS_GETEGID (38-41)
+
+```
+返回 uid / gid / euid / egid
+```
+
+**任务凭据读取**：返回当前任务（即发起调用的进程）的 Unix 式用户/组 ID。新任务零初始化 → 默认 root(0)。
+
+### SYS_SETUID / SYS_SETGID (42-43)
+
+```
+返回 0 / -1
+```
+
+**切换用户/组**：root(euid=0) 可任意设置（真实+生效 ID 一起改）；非 root 只能把 euid 设回自己的真实 uid（Linux 语义，非 root 无法升权回 root）。
+
+### SYS_STAT (44)
+
+```
+ebx=路径, ecx=stat_info_t*（16 字节：mode/uid/gid/size），返回 0/-1
+```
+
+**取文件元数据**：mode 含类型位（S_IFDIR/S_IFREG）+ rwxrwxrwx + suid/sgid/sticky；旧文件（无权限元数据）返回默认值（目录 0755、文件 0644，root 属主）。
+
+### SYS_CHMOD (45)
+
+```
+ebx=路径, ecx=mode（八进制权限位），返回 0/-1
+```
+
+**改权限**：仅属主或 root；只改权限位，类型位保持。
+
+### SYS_CHOWN (46)
+
+```
+ebx=路径, ecx=uid, edx=gid（0xFFFF=保持原值），返回 0/-1
+```
+
+**改属主/组**：仅 root。
+
+### 权限体系说明
+
+- 权限检查（mask：4=读 2=写 1=执行）：euid==属主 → 属主位，egid==组 → 组位，否则其他位；**root 全放行**
+- 读文件/列目录：需文件/目录读权限；写文件（覆盖）/删文件/建目录：需**父目录写权限**（Linux 语义）；挂载/卸载：仅 root
+- Unix meta 存于 FAT 目录项借用字段（时间字段当前未实现）：offset13/14=mode，offset15=魔数 0x58，16-17=uid，18-19=gid；无魔数 → 默认 meta
+- 新建文件默认 0644、新目录默认 0755，属主=当前任务 uid
 
 ### SYS_CURSOR (37)
 
@@ -352,6 +399,15 @@ ebx = LBA, ecx = 512B 缓冲
 | 31 | SYS_GETKEY_NB | 非阻塞取键 |
 | 36 | SYS_READ_FILE_OFF | 偏移读文件 |
 | 37 | SYS_CURSOR | 光标显隐 |
+| 38 | SYS_GETUID | 读真实 uid |
+| 39 | SYS_GETGID | 读真实 gid |
+| 40 | SYS_GETEUID | 读生效 uid |
+| 41 | SYS_GETEGID | 读生效 gid |
+| 42 | SYS_SETUID | 设 uid |
+| 43 | SYS_SETGID | 设 gid |
+| 44 | SYS_STAT | 取文件元数据 |
+| 45 | SYS_CHMOD | 改权限 |
+| 46 | SYS_CHOWN | 改属主 |
 
 ## 与 Shell 指南的关系
 

@@ -14,6 +14,7 @@
 #include "../include/fs/vfs.h"
 #include "../include/proc/task.h"
 #include "../include/driver/rtc.h"
+#include "../include/lib/string.h"
 #include <stdint.h>
 
 int sys_putchar(char c) {
@@ -151,6 +152,57 @@ static int sys_set_pglyph(uint32_t glyph) {
 }
 
 /* 写文件：校验文件名/数据都在用户页内后交给 VFS 路由到对应 FAT 实例 */
+/* ---- Linux 权限检查（mask：4=读 2=写 1=执行；root(uid 0) 全放行） ---- */
+
+/* 子路径的父目录子路径：sub="a/b/c" → "a/b"；无 '/' 或空 → NULL（根目录） */
+static const char* sys_parent_sub(const char* sub, char* buf, unsigned int size) {
+    if (!sub || !sub[0]) return NULL;
+    const char* last = NULL;
+    for (const char* q = sub; *q; q++) if (*q == '/') last = q;
+    if (!last) return NULL;
+    unsigned int len = (unsigned int)(last - sub);
+    if (len == 0) return NULL;
+    if (len >= size) len = size - 1;
+    for (unsigned int i = 0; i < len; i++) buf[i] = sub[i];
+    buf[len] = '\0';
+    return buf;
+}
+
+/* 合成根目录项：全零 + 目录属性 → fat_entry_unix_meta 默认 0755 root */
+static void sys_root_entry(fat_dirent_t* e) {
+    for (int i = 0; i < 32; i++) ((uint8_t*)e)[i] = 0;
+    e->attributes = 0x10;
+}
+
+/* 单条目权限检查：euid==uid → 属主位，egid==gid → 组位，否则其他位 */
+static int sys_check_entry(const fat_dirent_t* e, uint8_t mask) {
+    uint16_t mode, uid, gid;
+    fat_entry_unix_meta(e, &mode, &uid, &gid);
+    uint32_t euid = current_task ? current_task->euid : 0;
+    uint32_t egid = current_task ? current_task->egid : 0;
+    if (euid == 0) return 0;                    /* root 绕过（Linux 语义） */
+    int shift;
+    if (euid == uid) shift = 6;
+    else if (egid == gid) shift = 3;
+    else shift = 0;
+    uint8_t bits = (uint8_t)((mode >> shift) & 7);
+    return (bits & mask) == mask ? 0 : -1;
+}
+
+/* 父目录写权限检查（Linux：增删文件都需要父目录写权限） */
+static int sys_check_parent_writable(fat_fs_t* fs, const char* sub) {
+    char pbuf[64];
+    const char* p = sys_parent_sub(sub, pbuf, sizeof(pbuf));
+    if (!p) {
+        fat_dirent_t root;
+        sys_root_entry(&root);
+        return sys_check_entry(&root, 2);
+    }
+    fat_dirent_t pe;
+    if (!fat_find_file(fs, p, &pe)) return -1;
+    return sys_check_entry(&pe, 2);
+}
+
 static int sys_write_file(uint32_t filename, uint32_t data, uint32_t size) {
     if (!filename || !data) return -1;
     if (!vmm_is_user_accessible(filename)) return -1;
@@ -161,7 +213,26 @@ static int sys_write_file(uint32_t filename, uint32_t data, uint32_t size) {
     const char* sub;
     fat_fs_t* fs = vfs_resolve((const char*)filename, &sub);
     if (!fs) return -1;
-    return fat_write_file(fs, sub, (const void*)data, size) ? 0 : -1;
+
+    /* 权限：已存在 → 需文件写权限；新建 → 需父目录写权限 */
+    fat_dirent_t entry;
+    bool existed = fat_find_file(fs, sub, &entry);
+    uint16_t om = 0, ou = 0, og = 0;
+    if (existed) {
+        if (sys_check_entry(&entry, 2) != 0) return -1;
+        fat_entry_unix_meta(&entry, &om, &ou, &og);   /* 覆盖会重建目录项，事后恢复 meta */
+    } else {
+        if (sys_check_parent_writable(fs, sub) != 0) return -1;
+    }
+
+    if (!fat_write_file(fs, sub, (const void*)data, size)) return -1;
+
+    /* 新建：默认 0644 + 当前任务属主；覆盖：恢复原 meta */
+    uint32_t cuid = current_task ? current_task->uid : 0;
+    uint32_t cgid = current_task ? current_task->gid : 0;
+    if (existed) fat_set_file_meta(fs, sub, om, ou, og);
+    else fat_set_file_meta(fs, sub, S_IFREG | 0644, (uint16_t)cuid, (uint16_t)cgid);
+    return 0;
 }
 
 /* 读文件：文件名/缓冲都在用户页内；返回实际字节数 */
@@ -177,6 +248,7 @@ static int sys_read_file(uint32_t filename, uint32_t buf, uint32_t max_size) {
     if (!fs) return -1;
     fat_dirent_t entry;
     if (!fat_find_file(fs, sub, &entry)) return -1;
+    if (sys_check_entry(&entry, 4) != 0) return -1;   /* 读权限 */
     return (int)fat_load_file(fs, &entry, (void*)buf, max_size);
 }
 
@@ -193,6 +265,7 @@ static int sys_read_file_off(uint32_t filename, uint32_t offset, uint32_t buf, u
     if (!fs) return -1;
     fat_dirent_t entry;
     if (!fat_find_file(fs, sub, &entry)) return -1;
+    if (sys_check_entry(&entry, 4) != 0) return -1;   /* 读权限 */
     return (int)fat_load_file_off(fs, &entry, offset, (void*)buf, max_size);
 }
 
@@ -203,6 +276,7 @@ static int sys_delete_file(uint32_t filename) {
     const char* sub;
     fat_fs_t* fs = vfs_resolve((const char*)filename, &sub);
     if (!fs) return -1;
+    if (sys_check_parent_writable(fs, sub) != 0) return -1;   /* 父目录写权限 */
     return fat_delete_file(fs, sub) ? 0 : -1;
 }
 
@@ -213,7 +287,101 @@ static int sys_mkdir(uint32_t path) {
     const char* sub;
     fat_fs_t* fs = vfs_resolve((const char*)path, &sub);
     if (!fs) return -1;
-    return fat_mkdir(fs, sub) ? 0 : -1;
+    if (sys_check_parent_writable(fs, sub) != 0) return -1;   /* 父目录写权限 */
+    if (!fat_mkdir(fs, sub)) return -1;
+    /* 新目录：默认 0755 + 当前任务属主 */
+    uint32_t cuid = current_task ? current_task->uid : 0;
+    uint32_t cgid = current_task ? current_task->gid : 0;
+    fat_set_file_meta(fs, sub, S_IFDIR | 0755, (uint16_t)cuid, (uint16_t)cgid);
+    return 0;
+}
+
+/* ---- 凭据：uid/gid/euid/egid ---- */
+static int sys_getuid(void)  { return current_task ? (int)current_task->uid  : 0; }
+static int sys_getgid(void)  { return current_task ? (int)current_task->gid  : 0; }
+static int sys_geteuid(void) { return current_task ? (int)current_task->euid : 0; }
+static int sys_getegid(void) { return current_task ? (int)current_task->egid : 0; }
+
+/* setuid：root 任意设（uid+euid）；非 root 只能把 euid 设回真实 uid */
+static int sys_setuid(uint32_t uid) {
+    if (!current_task) return -1;
+    if (current_task->euid == 0) { current_task->uid = current_task->euid = uid; return 0; }
+    if (uid == current_task->uid) { current_task->euid = uid; return 0; }
+    return -1;
+}
+
+static int sys_setgid(uint32_t gid) {
+    if (!current_task) return -1;
+    if (current_task->euid == 0) { current_task->gid = current_task->egid = gid; return 0; }
+    if (gid == current_task->gid) { current_task->egid = gid; return 0; }
+    return -1;
+}
+
+/* ---- stat / chmod / chown ---- */
+static int sys_stat(uint32_t path, uint32_t buf) {
+    if (!path || !buf) return -1;
+    if (!vmm_is_user_accessible(path)) return -1;
+    if (!vmm_is_user_accessible(buf) || !vmm_is_user_accessible(buf + 15)) return -1;
+
+    const char* p = (const char*)path;
+    stat_info_t st;
+
+    /* 虚拟目录 /dev /mnt：合成 0755 root 目录 */
+    if (p[0] == '/' &&
+        (((p[1]=='d'||p[1]=='D') && (p[2]=='e'||p[2]=='E') && (p[3]=='v'||p[3]=='V') && p[4]=='\0') ||
+         ((p[1]=='m'||p[1]=='M') && (p[2]=='n'||p[2]=='N') && (p[3]=='t'||p[3]=='T') && p[4]=='\0'))) {
+        st.mode = S_IFDIR | 0755; st.uid = 0; st.gid = 0; st.size = 0;
+        memcpy((void*)buf, &st, sizeof(st));
+        return 0;
+    }
+
+    const char* sub;
+    fat_fs_t* fs = vfs_resolve(p, &sub);
+    if (!fs) return -1;
+    fat_dirent_t entry;
+    if (!fat_find_file(fs, sub, &entry)) return -1;
+    fat_entry_unix_meta(&entry, &st.mode, &st.uid, &st.gid);
+    st.size = entry.file_size;
+    memcpy((void*)buf, &st, sizeof(st));
+    return 0;
+}
+
+/* chmod：仅属主或 root；只改权限位（r/w/x + suid/sgid/sticky），类型位保持 */
+static int sys_chmod(uint32_t path, uint32_t mode) {
+    if (!path) return -1;
+    if (!vmm_is_user_accessible(path)) return -1;
+    const char* sub;
+    fat_fs_t* fs = vfs_resolve((const char*)path, &sub);
+    if (!fs) return -1;
+    fat_dirent_t entry;
+    if (!fat_find_file(fs, sub, &entry)) return -1;
+
+    uint16_t m, u, g;
+    fat_entry_unix_meta(&entry, &m, &u, &g);
+    uint32_t euid = current_task ? current_task->euid : 0;
+    if (euid != 0 && euid != u) return -1;   /* 非属主非 root */
+
+    uint16_t newmode = (uint16_t)((m & S_IFMT) | (mode & 07777));
+    return fat_set_file_meta(fs, sub, newmode, u, g) ? 0 : -1;
+}
+
+/* chown：仅 root；uid/gid=0xFFFF 表示保持原值 */
+static int sys_chown(uint32_t path, uint32_t uid, uint32_t gid) {
+    if (!path) return -1;
+    if (!vmm_is_user_accessible(path)) return -1;
+    if (!current_task || current_task->euid != 0) return -1;
+
+    const char* sub;
+    fat_fs_t* fs = vfs_resolve((const char*)path, &sub);
+    if (!fs) return -1;
+    fat_dirent_t entry;
+    if (!fat_find_file(fs, sub, &entry)) return -1;
+
+    uint16_t m, u, g;
+    fat_entry_unix_meta(&entry, &m, &u, &g);
+    if (uid != 0xFFFF) u = (uint16_t)uid;
+    if (gid != 0xFFFF) g = (uint16_t)gid;
+    return fat_set_file_meta(fs, sub, m, u, g) ? 0 : -1;
 }
 
 /* 列目录：fat_dirent_t 数组写入用户缓冲（path 可为 NULL=根）
@@ -241,6 +409,16 @@ static int sys_list(uint32_t path, uint32_t buf, uint32_t max) {
     const char* sub;
     fat_fs_t* fs = vfs_resolve(p, &sub);
     if (!fs) return -1;
+    /* 读目录权限检查（root 绕过；虚拟目录已提前返回） */
+    if (sub && sub[0]) {
+        fat_dirent_t de;
+        if (!fat_find_file(fs, sub, &de)) return -1;
+        if (sys_check_entry(&de, 4) != 0) return -1;
+    } else {
+        fat_dirent_t root;
+        sys_root_entry(&root);
+        if (sys_check_entry(&root, 4) != 0) return -1;
+    }
     uint32_t dir_cluster = fat_open_dir(fs, sub);
     if (dir_cluster == 0xFFFFFFFF) return -1;
     int n = (int)fat_read_dir(fs, dir_cluster, (fat_dirent_t*)buf, max);
@@ -322,6 +500,7 @@ static int sys_usb_info(void) {
 
 /* 挂载设备（ebx=设备名, ecx=挂载点） */
 static int sys_mount(uint32_t dev_name, uint32_t point) {
+    if (!current_task || current_task->euid != 0) return -1;   /* 仅 root 可挂载 */
     if (!dev_name || !point) return -1;
     if (!vmm_is_user_accessible(dev_name) || !vmm_is_user_accessible(point)) return -1;
     return vfs_mount((const char*)point, (const char*)dev_name) ? 0 : -1;
@@ -329,6 +508,7 @@ static int sys_mount(uint32_t dev_name, uint32_t point) {
 
 /* 卸载（ebx=挂载点） */
 static int sys_umount(uint32_t point) {
+    if (!current_task || current_task->euid != 0) return -1;   /* 仅 root 可卸载 */
     if (!point) return -1;
     if (!vmm_is_user_accessible(point)) return -1;
     return vfs_umount((const char*)point) ? 0 : -1;
@@ -497,6 +677,47 @@ void syscall_dispatcher(regs_t *regs) {
         case SYS_READ_FILE_OFF:
             /* ebx=文件名, ecx=偏移, edx=缓冲, esi=最大长度 */
             ret = sys_read_file_off(regs->ebx, regs->ecx, regs->edx, regs->esi);
+            break;
+
+        case SYS_GETUID:
+            ret = sys_getuid();
+            break;
+
+        case SYS_GETGID:
+            ret = sys_getgid();
+            break;
+
+        case SYS_GETEUID:
+            ret = sys_geteuid();
+            break;
+
+        case SYS_GETEGID:
+            ret = sys_getegid();
+            break;
+
+        case SYS_SETUID:
+            /* ebx = uid */
+            ret = sys_setuid(regs->ebx);
+            break;
+
+        case SYS_SETGID:
+            /* ebx = gid */
+            ret = sys_setgid(regs->ebx);
+            break;
+
+        case SYS_STAT:
+            /* ebx = 路径, ecx = stat_info_t* */
+            ret = sys_stat(regs->ebx, regs->ecx);
+            break;
+
+        case SYS_CHMOD:
+            /* ebx = 路径, ecx = mode */
+            ret = sys_chmod(regs->ebx, regs->ecx);
+            break;
+
+        case SYS_CHOWN:
+            /* ebx = 路径, ecx = uid, edx = gid */
+            ret = sys_chown(regs->ebx, regs->ecx, regs->edx);
             break;
 
         default:

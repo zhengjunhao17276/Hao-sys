@@ -540,6 +540,62 @@ bool fat_find_file(fat_fs_t* fs, const char* filename, fat_dirent_t* out_entry) 
     return true;
 }
 
+/* ---- Linux 权限 meta：目录项借用字段的读写 ---- */
+
+void fat_entry_unix_meta(const fat_dirent_t* e, uint16_t* mode, uint16_t* uid, uint16_t* gid) {
+    if (!e) { if (mode) *mode = S_IFREG | 0644; if (uid) *uid = 0; if (gid) *gid = 0; return; }
+    if ((e->creation_time >> 8) == FAT_META_MAGIC) {
+        if (mode) *mode = (uint16_t)((uint16_t)e->creation_time_tenths |
+                                     ((uint16_t)(e->creation_time & 0xFF) << 8));
+        if (uid)  *uid  = e->creation_date;
+        if (gid)  *gid  = e->last_access_date;
+    } else {
+        /* 旧条目/无 meta：按类型给默认值 */
+        if (mode) *mode = (e->attributes & 0x10) ? (S_IFDIR | 0755) : (S_IFREG | 0644);
+        if (uid)  *uid  = 0;
+        if (gid)  *gid  = 0;
+    }
+}
+
+void fat_entry_set_unix_meta(fat_dirent_t* e, uint16_t mode, uint16_t uid, uint16_t gid) {
+    if (!e) return;
+    e->creation_time_tenths = (uint8_t)(mode & 0xFF);
+    e->creation_time = (uint16_t)(((mode >> 8) & 0xFF) | (FAT_META_MAGIC << 8));
+    e->creation_date = uid;
+    e->last_access_date = gid;
+}
+
+bool fat_get_file_meta(fat_fs_t* fs, const char* filename, uint16_t* mode, uint16_t* uid, uint16_t* gid) {
+    uint32_t fl = irq_lock();
+    if (!fs || !fs->initialized || !filename) { irq_unlock(fl); return false; }
+    fat_dirent_t entry;
+    if (!fat_find_file(fs, filename, &entry)) { irq_unlock(fl); return false; }
+    fat_entry_unix_meta(&entry, mode, uid, gid);
+    irq_unlock(fl);
+    return true;
+}
+
+bool fat_set_file_meta(fat_fs_t* fs, const char* filename, uint16_t mode, uint16_t uid, uint16_t gid) {
+    uint32_t fl = irq_lock();
+    if (!fs || !fs->initialized || !filename) { irq_unlock(fl); return false; }
+
+    char name_83[12];
+    fat_dirent_t entry;
+    bool exists = false;
+    uint32_t parent = fat_resolve_parent(fs, filename, name_83, &entry, &exists);
+    if (parent == 0xFFFFFFFF || !exists) { irq_unlock(fl); return false; }
+
+    uint32_t lba, offset;
+    int slot = dir_find_slot(fs, parent, name_83, &lba, &offset);
+    if (slot != 1) { irq_unlock(fl); return false; }
+    if (!fat_dev_read(fs, lba, fs->sector_buffer)) { irq_unlock(fl); return false; }
+    fat_dirent_t* e = (fat_dirent_t*)(fs->sector_buffer + offset);
+    fat_entry_set_unix_meta(e, mode, uid, gid);
+    bool ok = fat_dev_write(fs, lba, fs->sector_buffer);
+    irq_unlock(fl);
+    return ok;
+}
+
 /* 沿簇链读文件：首簇 → FAT[next] → ... → EOF。
  * 簇 N 的扇区 = first_data_sector + (N-2) * sectors_per_cluster */
 uint32_t fat_load_file(fat_fs_t* fs, const fat_dirent_t* entry, void* buffer, uint32_t max_size) {

@@ -64,16 +64,49 @@ typedef struct __attribute__((packed)) {
     uint8_t  name[11];              /* 8.3 格式文件名（短文件名） */
     uint8_t  attributes;            /* 文件属性（只读/隐藏/系统/卷标/目录/归档） */
     uint8_t  nt_reserved;           /* NT 保留（用于大小写信息） */
-    uint8_t  creation_time_tenths;  /* 创建时间（毫秒级） */
-    uint16_t creation_time;         /* 创建时间 */
-    uint16_t creation_date;         /* 创建日期 */
-    uint16_t last_access_date;      /* 最后访问日期 */
+    uint8_t  creation_time_tenths;  /* ⚠️ 借用：Unix mode 低字节（时间未实现恒 0） */
+    uint16_t creation_time;         /* ⚠️ 借用：低字节=Unix mode 高字节，高字节=魔数 */
+    uint16_t creation_date;         /* ⚠️ 借用：Unix uid（小端） */
+    uint16_t last_access_date;      /* ⚠️ 借用：Unix gid（小端） */
     uint16_t cluster_high;          /* FAT32 簇号高 16 位 */
     uint16_t last_write_time;       /* 最后修改时间 */
     uint16_t last_write_date;       /* 最后修改日期 */
     uint16_t cluster_low;           /* 簇号低 16 位 */
     uint32_t file_size;             /* 文件大小（字节），目录此项为 0 */
 } fat_dirent_t;
+
+/* ---- Linux 权限扩展（存于 FAT 目录项的借用字段） ----
+ * 本内核未实现目录项时间戳（所有时间字段恒 0），借用：
+ *   offset 13 (creation_time_tenths) = mode 低字节
+ *   offset 14 (creation_time 低字节)  = mode 高字节
+ *   offset 15 (creation_time 高字节)  = 魔数 0x58（无魔数 → 默认 meta）
+ *   offset 16-17 (creation_date)      = uid（小端）
+ *   offset 18-19 (last_access_date)   = gid（小端）
+ * 默认 meta：目录 0755、文件 0644，uid=gid=0。
+ * ⚠️ 将来实现目录项时间戳时需迁移（换字段或独立 xattr）。 */
+#define FAT_META_MAGIC 0x58
+
+/* Linux 风格权限位（与 POSIX 数值一致） */
+#define S_IFMT   0170000
+#define S_IFREG  0100000
+#define S_IFDIR  0040000
+#define S_ISUID  04000
+#define S_ISGID  02000
+#define S_ISVTX  01000
+#define S_IRUSR  00400
+#define S_IWUSR  00200
+#define S_IXUSR  00100
+#define S_IRGRP  00040
+#define S_IWGRP  00020
+#define S_IXGRP  00010
+#define S_IROTH  00004
+#define S_IWOTH  00002
+#define S_IXOTH  00001
+
+/* 解析目录项的 Unix meta（无魔数 → 默认值） */
+void fat_entry_unix_meta(const fat_dirent_t* e, uint16_t* mode, uint16_t* uid, uint16_t* gid);
+/* 把 Unix meta 写入目录项（含魔数） */
+void fat_entry_set_unix_meta(fat_dirent_t* e, uint16_t mode, uint16_t uid, uint16_t gid);
 
 /* fat_fs_t - FAT 实例：一个挂载的文件系统对应一份状态。
  * sector_buffer/dir_scan_entries 不能共享（并发访问会互相踩踏）。 */
@@ -128,5 +161,10 @@ uint32_t fat_read_dir(fat_fs_t* fs, uint32_t dir_cluster, fat_dirent_t* entries,
 
 /* 解析目录路径，返回目录首簇号（0=根）；失败返回 0xFFFFFFFF */
 uint32_t fat_open_dir(fat_fs_t* fs, const char* path);
+
+/* 按路径读 meta（stat 用），失败返回 false */
+bool fat_get_file_meta(fat_fs_t* fs, const char* filename, uint16_t* mode, uint16_t* uid, uint16_t* gid);
+/* 按路径写 meta（chmod/chown 用），失败返回 false */
+bool fat_set_file_meta(fat_fs_t* fs, const char* filename, uint16_t mode, uint16_t uid, uint16_t gid);
 
 #endif

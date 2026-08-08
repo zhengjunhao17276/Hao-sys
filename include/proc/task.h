@@ -34,6 +34,11 @@ typedef struct task_struct {
 
     uint32_t kernel_esp0;   /* 用户态中断栈顶，调度时写入 TSS.esp0 */
 
+    /* Linux 权限体系凭据：uid/gid=真实用户，euid/egid=生效用户
+     * （零初始化 → 默认 root）。setuid 由 SYS_SETUID 修改；
+     * 文件访问检查用 euid/egid，root(0) 全放行 */
+    uint32_t uid, gid, euid, egid;
+
     /* ⚠️ 不能用 kernel_esp0 判断任务类型（内核任务也有内核栈）。
      * 用户任务：esp 指向 [pusha 帧][iret 帧] 复合帧，switch_to_user 恢复；
      * 内核任务：esp 指向 [pusha 帧][EBP][entry]，switch_to 恢复 */

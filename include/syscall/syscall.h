@@ -43,6 +43,23 @@
 #define SYS_GETKEY_NB  31 /* 非阻塞取键：有键返回键值，无键返回 -1（TUI 事件循环用） */
 #define SYS_READ_FILE_OFF 36 /* 带偏移读文件（ebx=文件名, ecx=偏移, edx=缓冲, esi=最大长度） */
 #define SYS_CURSOR     37  /* 光标可见性（ebx: 0=隐藏, 1=显示） */
+#define SYS_GETUID     38  /* 读真实 uid（eax=uid） */
+#define SYS_GETGID     39  /* 读真实 gid（eax=gid） */
+#define SYS_GETEUID    40  /* 读生效 uid（eax=euid） */
+#define SYS_GETEGID    41  /* 读生效 gid（eax=egid） */
+#define SYS_SETUID     42  /* 设 uid（ebx=uid；root 任意设，非 root 只能设回真实 uid） */
+#define SYS_SETGID     43  /* 设 gid（ebx=gid；同上） */
+#define SYS_STAT       44  /* 取文件元数据（ebx=路径, ecx=stat_info_t*） */
+#define SYS_CHMOD      45  /* 改权限（ebx=路径, ecx=mode；需属主或 root） */
+#define SYS_CHOWN      46  /* 改属主/组（ebx=路径, ecx=uid, edx=gid；仅 root；0xFFFF=不改） */
+
+/* stat 结果（SYS_STAT 写入，16 字节；用户态镜像同名结构） */
+typedef struct {
+    uint16_t mode;      /* 类型位 + suid/sgid/sticky + rwxrwxrwx */
+    uint16_t uid;
+    uint16_t gid;
+    uint32_t size;
+} stat_info_t;
 
 /*
  * regs_t - 中断上下文（由 isr80_handler 压栈形成）

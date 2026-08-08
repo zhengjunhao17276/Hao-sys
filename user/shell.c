@@ -36,6 +36,40 @@
 #define SYS_GETKEY_NB  31  /* 非阻塞取键：有键返回键值，无键返回 -1 */
 #define SYS_READ_FILE_OFF 36  /* 带偏移读文件 */
 #define SYS_CURSOR     37  /* 光标可见性（0=隐藏，1=显示） */
+#define SYS_GETUID     38  /* 读真实 uid */
+#define SYS_GETGID     39  /* 读真实 gid */
+#define SYS_GETEUID    40  /* 读生效 uid */
+#define SYS_GETEGID    41  /* 读生效 gid */
+#define SYS_SETUID     42  /* 设 uid（ebx=uid） */
+#define SYS_SETGID     43  /* 设 gid（ebx=gid） */
+#define SYS_STAT       44  /* 取元数据（ebx=路径, ecx=stat_info_t*） */
+#define SYS_CHMOD      45  /* 改权限（ebx=路径, ecx=mode） */
+#define SYS_CHOWN      46  /* 改属主（ebx=路径, ecx=uid, edx=gid） */
+
+/* stat 结果（与内核 stat_info_t 一致，16 字节） */
+struct stat_info {
+    unsigned short mode;
+    unsigned short uid;
+    unsigned short gid;
+    unsigned int size;
+};
+
+/* Linux 权限位（与内核一致） */
+#define S_IFMT   0170000
+#define S_IFREG  0100000
+#define S_IFDIR  0040000
+#define S_ISUID  04000
+#define S_ISGID  02000
+#define S_ISVTX  01000
+#define S_IRUSR  00400
+#define S_IWUSR  00200
+#define S_IXUSR  00100
+#define S_IRGRP  00040
+#define S_IWGRP  00020
+#define S_IXGRP  00010
+#define S_IROTH  00004
+#define S_IWOTH  00002
+#define S_IXOTH  00001
 
 /* FAT 目录项（与内核 fat_dirent_t 布局一致，32 字节） */
 struct dirent {
@@ -122,6 +156,27 @@ static void set_cursor(int row, int col) {
 /* cursor_visible - 硬件光标显隐（0=隐藏，1=显示）；全屏 TUI 界面用来消除闪烁 */
 static void cursor_visible(int on) {
     __asm__ volatile ("int $0x80" : : "a"(SYS_CURSOR), "b"((unsigned int)on) : "memory");
+}
+
+/* ---- Linux 权限 syscall 封装 ---- */
+static int getuid(void)  { int r; __asm__ volatile ("int $0x80" : "=a"(r) : "a"(SYS_GETUID) : "memory"); return r; }
+static int getgid(void)  { int r; __asm__ volatile ("int $0x80" : "=a"(r) : "a"(SYS_GETGID) : "memory"); return r; }
+static int geteuid(void) { int r; __asm__ volatile ("int $0x80" : "=a"(r) : "a"(SYS_GETEUID) : "memory"); return r; }
+static int getegid(void) { int r; __asm__ volatile ("int $0x80" : "=a"(r) : "a"(SYS_GETEGID) : "memory"); return r; }
+static int setuid_sys(unsigned int uid) {
+    int r; __asm__ volatile ("int $0x80" : "=a"(r) : "a"(SYS_SETUID), "b"(uid) : "memory"); return r;
+}
+static int setgid_sys(unsigned int gid) {
+    int r; __asm__ volatile ("int $0x80" : "=a"(r) : "a"(SYS_SETGID), "b"(gid) : "memory"); return r;
+}
+static int stat_sys(const char* path, struct stat_info* st) {
+    int r; __asm__ volatile ("int $0x80" : "=a"(r) : "a"(SYS_STAT), "b"((unsigned int)path), "c"((unsigned int)st) : "memory"); return r;
+}
+static int chmod_sys(const char* path, unsigned int mode) {
+    int r; __asm__ volatile ("int $0x80" : "=a"(r) : "a"(SYS_CHMOD), "b"((unsigned int)path), "c"(mode) : "memory"); return r;
+}
+static int chown_sys(const char* path, unsigned int uid, unsigned int gid) {
+    int r; __asm__ volatile ("int $0x80" : "=a"(r) : "a"(SYS_CHOWN), "b"((unsigned int)path), "c"(uid), "d"(gid) : "memory"); return r;
 }
 
 /* get_cursor - 读光标位置（(行<<16)|列） */
@@ -575,7 +630,12 @@ static void cmd_help(const char* args) { (void)args;
     write("  save      - Save text to a file (overwrites)\n");
     write("  cat       - Show file contents\n");
     write("  mkdir     - Create a directory\n");
-    write("  ls        - List directory contents\n");
+    write("  ls        - List directory contents (ls -l = long)\n");
+    write("  id        - Show uid/gid/euid/egid\n");
+    write("  chmod     - Change permissions (chmod <mode> <file>)\n");
+    write("  chown     - Change owner (chown <uid> <file>, root only)\n");
+    write("  stat      - Show file mode/uid/gid/size\n");
+    write("  setuid    - Switch user (setuid <uid>, root only)\n");
     write("  cd        - Change directory (cd <path>, or cd for root)\n");
     write("  pwd       - Print working directory\n");
     write("  rm        - Delete a file\n");
@@ -741,10 +801,31 @@ static void cmd_cd(const char* args) {
 }
 
 /* cmd_ls - 列出目录内容 */
+/* mode 位 → "drwxrwxrwx" 字符串 */
+static void mode_string(unsigned short mode, char* out) {
+    out[0] = (mode & S_IFDIR) ? 'd' : '-';
+    out[1] = (mode & S_IRUSR) ? 'r' : '-';
+    out[2] = (mode & S_IWUSR) ? 'w' : '-';
+    out[3] = (mode & S_IXUSR) ? 'x' : '-';
+    out[4] = (mode & S_IRGRP) ? 'r' : '-';
+    out[5] = (mode & S_IWGRP) ? 'w' : '-';
+    out[6] = (mode & S_IXGRP) ? 'x' : '-';
+    out[7] = (mode & S_IROTH) ? 'r' : '-';
+    out[8] = (mode & S_IWOTH) ? 'w' : '-';
+    out[9] = (mode & S_IXOTH) ? 'x' : '-';
+    out[10] = '\0';
+}
+
 static void cmd_ls(const char* args) {
+    /* 参数解析：可选 "-l" 长格式 + 路径 */
+    int long_fmt = 0;
+    const char* a = args;
+    while (*a == ' ') a++;
+    if (a[0] == '-' && a[1] == 'l') { long_fmt = 1; a += 2; while (*a == ' ') a++; }
+
     char path[64];
     unsigned int i = 0;
-    while (args[i] && args[i] != ' ' && i < sizeof(path) - 1) { path[i] = args[i]; i++; }
+    while (a[i] && a[i] != ' ' && i < sizeof(path) - 1) { path[i] = a[i]; i++; }
     path[i] = '\0';
 
     char abs[64];
@@ -782,19 +863,147 @@ static void cmd_ls(const char* args) {
             for (int j = 0; j < ext_len; j++) disp[d++] = (char)ents[k].name[8 + j];
         }
         disp[d] = '\0';
-        write(disp);
-        if (ents[k].attributes & 0x10) {
-            write("  <DIR>\n");
+
+        if (long_fmt) {
+            /* 长格式：mode uid gid size name（stat 取 meta；目录项无 meta 时给默认） */
+            char full[80];
+            unsigned int fk = 0;
+            while (abs[fk] && fk < sizeof(full) - 1) { full[fk] = abs[fk]; fk++; }
+            if (fk == 0 || full[fk-1] != '/') full[fk++] = '/';
+            unsigned int fn = 0;
+            while (disp[fn] && fk < sizeof(full) - 1) { full[fk++] = disp[fn++]; }
+            full[fk] = '\0';
+
+            struct stat_info st;
+            unsigned short m = (ents[k].attributes & 0x10) ? (S_IFDIR | 0755) : (S_IFREG | 0644);
+            unsigned short u = 0, g = 0;
+            unsigned int sz = ents[k].file_size;
+            if (stat_sys(full, &st) == 0) { m = st.mode; u = st.uid; g = st.gid; sz = st.size; }
+            char ms[11];
+            mode_string(m, ms);
+            write(ms);
+            write(" ");
+            print_num((int)u);
+            write(" ");
+            print_num((int)g);
+            write(" ");
+            print_num((int)sz);
+            write(" ");
+            write(disp);
+            write("\n");
         } else {
-            write("  ");
-            print_num((int)ents[k].file_size);
-            write(" bytes\n");
+            write(disp);
+            if (ents[k].attributes & 0x10) {
+                write("  <DIR>\n");
+            } else {
+                write("  ");
+                print_num((int)ents[k].file_size);
+                write(" bytes\n");
+            }
         }
     }
     /* 只有 . / .. 的目录 = 空目录 */
     if (shown == 0) {
         write("(empty)\n");
     }
+}
+
+/* cmd_id - 打印当前凭据 */
+static void cmd_id(const char* args) { (void)args;
+    write("uid=");
+    print_num(getuid());
+    if (getuid() == 0) write("(root)");
+    write(" gid=");
+    print_num(getgid());
+    write(" euid=");
+    print_num(geteuid());
+    write(" egid=");
+    print_num(getegid());
+    write("\n");
+}
+
+/* cmd_setuid - 切换用户（root 可任意设；非 root 只能设回真实 uid） */
+static void cmd_setuid(const char* args) {
+    unsigned int uid = 0;
+    const char* a = args;
+    while (*a >= '0' && *a <= '9') { uid = uid * 10 + (*a - '0'); a++; }
+    if (setuid_sys(uid) == 0) write("ok\n");
+    else write("setuid failed\n");
+}
+
+/* cmd_setgid - 切换组 */
+static void cmd_setgid(const char* args) {
+    unsigned int gid = 0;
+    const char* a = args;
+    while (*a >= '0' && *a <= '9') { gid = gid * 10 + (*a - '0'); a++; }
+    if (setgid_sys(gid) == 0) write("ok\n");
+    else write("setgid failed\n");
+}
+
+/* 八进制解析："644" → 0644 */
+static unsigned int parse_octal(const char* s) {
+    unsigned int v = 0;
+    while (*s >= '0' && *s <= '7') { v = v * 8 + (*s - '0'); s++; }
+    return v;
+}
+
+/* cmd_chmod - chmod <octal-mode> <file> */
+static void cmd_chmod(const char* args) {
+    const char* a = args;
+    while (*a == ' ') a++;
+    unsigned int mode = parse_octal(a);
+    while (*a >= '0' && *a <= '7') a++;
+    while (*a == ' ') a++;
+    if (*a == '\0') { write("usage: chmod <mode> <file>\n"); return; }
+    char path[64];
+    unsigned int i = 0;
+    while (a[i] && a[i] != ' ' && i < sizeof(path) - 1) { path[i] = a[i]; i++; }
+    path[i] = '\0';
+    char abs[64];
+    resolve_path(path, abs, sizeof(abs));
+    if (chmod_sys(abs, mode) == 0) write("ok\n");
+    else write("chmod failed\n");
+}
+
+/* cmd_chown - chown <uid> <file>（gid 保持不变） */
+static void cmd_chown(const char* args) {
+    const char* a = args;
+    while (*a == ' ') a++;
+    unsigned int uid = 0;
+    while (*a >= '0' && *a <= '9') { uid = uid * 10 + (*a - '0'); a++; }
+    while (*a == ' ') a++;
+    if (*a == '\0') { write("usage: chown <uid> <file>\n"); return; }
+    char path[64];
+    unsigned int i = 0;
+    while (a[i] && a[i] != ' ' && i < sizeof(path) - 1) { path[i] = a[i]; i++; }
+    path[i] = '\0';
+    char abs[64];
+    resolve_path(path, abs, sizeof(abs));
+    if (chown_sys(abs, uid, 0xFFFF) == 0) write("ok\n");
+    else write("chown failed\n");
+}
+
+/* cmd_stat - stat <file>：打印 mode/uid/gid/size */
+static void cmd_stat(const char* args) {
+    char path[64];
+    unsigned int i = 0;
+    while (args[i] && args[i] != ' ' && i < sizeof(path) - 1) { path[i] = args[i]; i++; }
+    path[i] = '\0';
+    if (path[0] == '\0') { write("usage: stat <file>\n"); return; }
+    char abs[64];
+    resolve_path(path, abs, sizeof(abs));
+    struct stat_info st;
+    if (stat_sys(abs, &st) != 0) { write("stat failed\n"); return; }
+    char ms[11];
+    mode_string(st.mode, ms);
+    write(ms);
+    write(" uid=");
+    print_num((int)st.uid);
+    write(" gid=");
+    print_num((int)st.gid);
+    write(" size=");
+    print_num((int)st.size);
+    write("\n");
 }
 
 /* cmd_mount - 挂载设备：两个空白分隔 token（设备名 + 挂载点） */
@@ -1535,6 +1744,12 @@ static command_t commands[] = {
     { "rm",    cmd_rm },
     { "mkdir", cmd_mkdir },
     { "ls",    cmd_ls },
+    { "id",    cmd_id },
+    { "setuid", cmd_setuid },
+    { "setgid", cmd_setgid },
+    { "chmod", cmd_chmod },
+    { "chown", cmd_chown },
+    { "stat",  cmd_stat },
     { "cd",    cmd_cd },
     { "pwd",   cmd_pwd },
     { "mount", cmd_mount },
