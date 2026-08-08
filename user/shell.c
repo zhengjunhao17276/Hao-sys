@@ -1030,57 +1030,6 @@ static void tui_draw(int sel, int sens, int color_idx, int glyph_idx) {
     write("W/S select    A/D adjust    Q/Esc exit");
 }
 
-/*
- * fm_input - TUI 底栏输入框：提示 + 读一行（Enter 确认，Esc 取消）
- * 返回输入长度（0=取消/空）；输入写入 buf（≤size-1）
- */
-static unsigned int fm_input(const char* prompt, char* buf, unsigned int size) {
-    /* 底栏提示 */
-    set_cursor(23, 0);
-    putchar(0xC0);
-    for (int i = 1; i < 79; i++) putchar(0xC4);
-    putchar(0xD9);
-    set_cursor(23, 2);
-    write(prompt);
-
-    unsigned int len = 0;
-    buf[0] = '\0';
-    while (1) {
-        /* 回显当前输入（清残留） */
-        set_cursor(23, 2);
-        write(prompt);
-        for (unsigned int i = 0; i < len; i++) putchar(buf[i]);
-        for (unsigned int i = len; i < 40; i++) putchar(' ');
-
-        int c = getkey_nb();
-        if (c == -1) {
-            /* 与主循环一致：轮询鼠标（消费 PS/2 FIFO 鼠标字节），避免
-             * 键盘字节被鼠标字节阻塞（0x64 bit5 优先于 bit0 分流） */
-            int mx, my, mb;
-            getmouse(&mx, &my, &mb);
-            yield();
-            continue;
-        }
-        if (c == '\n' || c == '\r') {
-            buf[len] = '\0';
-            return len;
-        } else if (c == 0x1B) {
-            return 0;   /* Esc 取消 */
-        } else if (c == '\b') {
-            if (len > 0) len--;
-        } else if (c >= ' ' && c <= '~') {
-            /* 8.3 合法字符：字母（转大写）/数字/部分符号 */
-            char ch = (char)c;
-            if (ch >= 'a' && ch <= 'z') ch = ch - 'a' + 'A';  /* 转大写 */
-            if (len < size - 1 &&
-                ((ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') ||
-                 ch == '-' || ch == '_' || ch == '.')) {
-                buf[len++] = ch;
-            }
-        }
-    }
-}
-
 /* fm_parent - 栏的上级路径：cwd + "/.." 交给 resolve_path 归一化
  * （"/dev/.."→"/"，"/mnt/usb/.."→"/mnt"）。
  * ⚠️ 不能直接 resolve_path("..")：它相对全局 shell cwd 解析，FM 里
@@ -1119,6 +1068,12 @@ static void fileman_tui(void) {
         int dirty;
     } panes[2];
     int active = 0;            /* 活动栏：0=左 1=右 */
+
+    /* 就地新建（inline rename）状态：N 后活动栏列表顶部出现虚拟 [D] 条目，
+     * 直接打字命名，Enter 落盘创建，Esc 取消；名字后画静态块光标（不闪烁） */
+    int newdir = 0;
+    char newdir_name[16];
+    newdir_name[0] = '\0';
 
     /* 初始化：左栏 = shell 当前目录，右栏 = 根目录 */
     unsigned int ci = 0;
@@ -1159,6 +1114,21 @@ static void fileman_tui(void) {
                 if (panes[p].sel >= panes[p].count) panes[p].sel = panes[p].count > 0 ? panes[p].count - 1 : 0;
                 if (panes[p].scroll > panes[p].sel) panes[p].scroll = panes[p].sel;
                 if (panes[p].sel >= panes[p].scroll + 22) panes[p].scroll = panes[p].sel - 21;
+
+                /* 就地新建：活动栏列表顶部插入虚拟目录项（未落盘，Enter 才创建） */
+                if (newdir && p == active) {
+                    struct dirent fake;
+                    for (int j = 0; j < 32; j++) ((unsigned char*)&fake)[j] = 0;
+                    unsigned int nk = 0;
+                    while (newdir_name[nk] && nk < 11) { fake.name[nk] = (unsigned char)newdir_name[nk]; nk++; }
+                    while (nk < 11) fake.name[nk++] = ' ';
+                    fake.attributes = 0x10;              /* 目录 */
+                    for (int i = panes[p].count; i > 0; i--) panes[p].ents[i] = panes[p].ents[i - 1];
+                    panes[p].ents[0] = fake;
+                    panes[p].count++;
+                    panes[p].sel = 0;
+                    panes[p].scroll = 0;
+                }
             }
 
             /* 顶栏：两栏路径（左栏高亮活动色） */
@@ -1209,6 +1179,8 @@ static void fileman_tui(void) {
                     }
                     disp[d] = '\0';
                     write(disp);
+                    /* 就地新建行：名字后画静态块光标（不闪烁，指示输入位） */
+                    if (newdir && p == active && idx == 0) putchar(0xDB);
                     /* 文件大小（右对齐到栏宽） */
                     if (!(panes[p].ents[idx].attributes & 0x10)) {
                         for (int sp = d; sp < 22; sp++) putchar(' ');
@@ -1225,14 +1197,15 @@ static void fileman_tui(void) {
             for (int i = 1; i < 79; i++) putchar(0xC4);
             putchar(0xD9);
             set_cursor(23, 2);
-            write("Tab swap  Up/Down sel  Enter open  Esc up  C copy  N mkdir  D del  Q quit");
+            if (newdir) write("New dir: type name   Enter create   Esc cancel");
+            else write("Tab swap  Up/Down sel  Enter open  Esc up  C copy  N mkdir  D del  Q quit");
 
             panes[0].dirty = panes[1].dirty = 0;
         }
 
         /* ---- 鼠标轮询：点击选中 + 双击进入（活动栏） ---- */
         int mx, my, mb;
-        if (getmouse(&mx, &my, &mb) == 0) {
+        if (!newdir && getmouse(&mx, &my, &mb) == 0) {
             int lbtn = mb & 1;
             if (lbtn) {
                 if (!prev_lbtn) { press_x = mx; press_y = my; }
@@ -1290,7 +1263,46 @@ static void fileman_tui(void) {
             continue;
         }
 
-        if (c == '\t') {
+        if (newdir) {
+            /* 就地新建模式：打字直接改虚拟条目名 */
+            if (c == '\n' || c == '\r') {
+                if (newdir_name[0]) {
+                    char path[80];
+                    unsigned int pk = 0;
+                    while (panes[active].cwd[pk] && pk < sizeof(path) - 1) { path[pk] = panes[active].cwd[pk]; pk++; }
+                    if (path[pk-1] != '/') path[pk++] = '/';
+                    unsigned int pn = 0;
+                    while (newdir_name[pn] && pk < sizeof(path) - 1) { path[pk++] = newdir_name[pn++]; }
+                    path[pk] = '\0';
+                    if (mkdir_sys(path) == 0) {
+                        panes[active].sel = 9999;   /* 创建后选中列表末尾的新目录 */
+                        panes[active].scroll = 0;
+                    }
+                }
+                newdir = 0;
+                panes[active].dirty = 1;
+            } else if (c == 0x1B) {
+                newdir = 0;                        /* Esc 取消，不创建 */
+                panes[active].dirty = 1;
+            } else if (c == '\b') {
+                unsigned int nl = 0;
+                while (newdir_name[nl]) nl++;
+                if (nl > 0) newdir_name[nl - 1] = '\0';
+                panes[active].dirty = 1;
+            } else if (c >= ' ' && c <= '~') {
+                char ch = (char)c;
+                if (ch >= 'a' && ch <= 'z') ch = ch - 'a' + 'A';   /* 转大写 */
+                unsigned int nl = 0;
+                while (newdir_name[nl]) nl++;
+                if (nl < 12 &&
+                    ((ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') ||
+                     ch == '-' || ch == '_' || ch == '.')) {
+                    newdir_name[nl] = ch;
+                    newdir_name[nl + 1] = '\0';
+                }
+                panes[active].dirty = 1;
+            }
+        } else if (c == '\t') {
             /* Tab：切换活动栏 */
             active = 1 - active;
             panes[0].dirty = panes[1].dirty = 1;
@@ -1389,18 +1401,11 @@ static void fileman_tui(void) {
                 }
             }
         } else if (c == 'n' || c == 'N') {
-            /* 新建目录到活动栏当前目录 */
-            char name[16];
-            if (fm_input("New dir name: ", name, sizeof(name)) > 0) {
-                char path[80];
-                unsigned int pk = 0;
-                while (panes[active].cwd[pk] && pk < sizeof(path) - 1) { path[pk] = panes[active].cwd[pk]; pk++; }
-                if (path[pk-1] != '/') path[pk++] = '/';
-                unsigned int pn = 0;
-                while (name[pn] && pk < sizeof(path) - 1) { path[pk++] = name[pn++]; }
-                path[pk] = '\0';
-                if (mkdir_sys(path) == 0) panes[active].dirty = 1;
-            }
+            /* 新建目录：就地重命名式——列表顶部出虚拟 [D] 条目，直接打字 */
+            newdir = 1;
+            newdir_name[0] = '\0';
+            panes[active].sel = 0;
+            panes[active].scroll = 0;
             panes[active].dirty = 1;
         } else if (c == 'd' || c == 'D') {
             /* 删除活动栏选中项：Y 确认 */
