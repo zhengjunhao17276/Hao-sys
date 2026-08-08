@@ -8,11 +8,11 @@
 
 | 项目 | 值 |
 |---|---|
-| 加载路径 | `/SHELL.BIN`（磁盘根目录） |
+| 加载路径 | `/BIN/SHELL.BIN`（Linux 布局：/bin 目录下） |
 | 代码虚拟地址 | `0x10000000` |
-| 栈 | 代码页之后，`0x10007000` 起（含 1 个 guard page） |
+| 栈 | 代码页之后动态分配（2 页，含 1 个 guard page） |
 | 入口 | 文件开头第一个字节（扁平二进制，非 ELF） |
-| 大小限制 | 256KB |
+| 大小限制 | 256KB（保险丝）；`.bss` 上限由 kmain 的 BSS_PAGES 决定 |
 
 ```c
 /* 引导入口：跳到 main（必须放在文件最前） */
@@ -52,15 +52,17 @@ static int getmouse(int *x, int *y, int *buttons) {
 
 > 指针参数会被内核逐页校验（`vmm_is_user_accessible`），必须指向用户可访问内存，不能传内核地址或野指针。
 
-## 3. 系统调用完整列表（31 个）
+## 3. 系统调用完整列表（44 个）
 
 完整档案见 [syscalls.md](syscalls.md)——每个调用的参数、返回值、错误语义、示例都有。这里只列分类速查表：
 
 | 类 | 调用 |
 |---|---|
-| 终端输出 | PUTCHAR(1) WRITE(3) SET_CURSOR(7) GET_CURSOR(8) CLEAR(9) GET_COLOR(12) SET_COLOR(13) PROTECT(14) |
+| 终端输出 | PUTCHAR(1) WRITE(3) SET_CURSOR(7) GET_CURSOR(8) CLEAR(9) GET_COLOR(12) SET_COLOR(13) PROTECT(14) CURSOR(37) |
 | 键盘鼠标 | GETCHAR(2) GETKEY_NB(31) GETMOUSE(6) GET_SENS(10) SET_SENS(11) GET_PGLYPH(15) SET_PGLYPH(16) |
-| 文件系统 | WRITE_FILE(17) READ_FILE(18) DELETE_FILE(22) MKDIR(24) LIST(25) MOUNT(28) UMOUNT(29) |
+| 文件系统 | WRITE_FILE(17) READ_FILE(18) READ_FILE_OFF(36) DELETE_FILE(22) MKDIR(24) LIST(25) MOUNT(28) UMOUNT(29) |
+| 凭据/权限 | GETUID(38) GETGID(39) GETEUID(40) GETEGID(41) SETUID(42) SETGID(43) STAT(44) CHMOD(45) CHOWN(46) |
+| 电源 | POWEROFF(47) REBOOT(48) |
 | 系统信息 | EXIT(4) READ_SECT(5) TASKS(19) GET_TIME(20) GET_DATE(21) UPTIME(23) YIELD(26) USB_INFO(27) DEVICES(30) |
 
 调用约定：`eax=调用号, ebx/ecx/edx=参数, int $0x80, 返回值在 eax`。内联汇编封装示例：
@@ -118,6 +120,8 @@ struct dirent {
 ```
 
 8.3 名转可读名：基本名去尾空格，扩展名去尾空格后加 `.` 拼上。首字节 `0x00`=目录结束，`0xE5`=已删除项。
+
+> ⚠️ **Linux 权限扩展**：目录项的 `creation_time_tenths` / `creation_time` / `creation_date` / `last_access_date` 四个字段被借用存 Unix meta（mode/uid/gid，魔数 0x58 标记；本内核未实现时间戳，恒借用）。SYS_LIST 返回的仍是原始 32 字节；要拿权限/属主请用 **SYS_STAT(44)**，改权限用 **SYS_CHMOD(45)** / **SYS_CHOWN(46)**。
 
 ## 6. 屏幕与鼠标坐标
 

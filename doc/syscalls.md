@@ -1,6 +1,6 @@
 # HaoOS 系统调用档案
 
-HaoOS 用户态程序的唯一入口：`int 0x80`。共 42 个调用，覆盖终端输出、键盘鼠标、文件系统、系统信息四类。
+HaoOS 用户态程序的唯一入口：`int 0x80`。共 44 个调用，覆盖终端输出、键盘鼠标、文件系统、系统信息、凭据/权限、电源六类。
 
 ## 调用约定
 
@@ -168,6 +168,18 @@ ebx=路径, ecx=uid, edx=gid（0xFFFF=保持原值），返回 0/-1
 - 读文件/列目录：需文件/目录读权限；写文件（覆盖）/删文件/建目录：需**父目录写权限**（Linux 语义）；挂载/卸载：仅 root
 - Unix meta 存于 FAT 目录项借用字段（时间字段当前未实现）：offset13/14=mode，offset15=魔数 0x58，16-17=uid，18-19=gid；无魔数 → 默认 meta
 - 新建文件默认 0644、新目录默认 0755，属主=当前任务 uid
+
+### SYS_POWEROFF (47) / SYS_REBOOT (48)
+
+```
+不返回
+```
+
+**关机/重启**：
+
+- POWEROFF：先写 QEMU/Bochs 电源端口（0x604←0x2000，虚拟机关机；真机无副作用），再 `cli+hlt` 兜底
+- REBOOT：写 8042 复位口（0x64←0xFE，CPU 复位，QEMU/真机通用），未生效则 `cli+hlt` 兜底
+- shell 对应 `shutdown` / `reboot` 命令
 
 ### SYS_CURSOR (37)
 
@@ -408,6 +420,8 @@ ebx = LBA, ecx = 512B 缓冲
 | 44 | SYS_STAT | 取文件元数据 |
 | 45 | SYS_CHMOD | 改权限 |
 | 46 | SYS_CHOWN | 改属主 |
+| 47 | SYS_POWEROFF | 关机 |
+| 48 | SYS_REBOOT | 重启 |
 
 ## 与 Shell 指南的关系
 
